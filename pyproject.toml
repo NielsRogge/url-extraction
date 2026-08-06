@@ -1,0 +1,28 @@
+[project]
+name = "url-extraction"
+version = "0.1.0"
+description = "Harness-level GRPO for paper URL extraction with OpenCode, OpenEnv, and TRL"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.optional-dependencies]
+traces = [
+    "datasets>=4.0.0",
+    "httpx>=0.27.0",
+    "opencode-ai==0.1.0a36",
+    "pydantic>=2.10.0,<2.13",
+    "python-dotenv>=1.1.0",
+]
+train = [
+    "accelerate==1.14.0",
+    "bitsandbytes>=0.49.0; platform_system == 'Linux'",
+    "datasets>=4.0.0",
+    "peft==0.20.0",
+    "torch>=2.7.0",
+    "transformers==5.14.1",
+    "trl==1.9.2",
+]
+
+[tool.ruff]
+line-length = 120
