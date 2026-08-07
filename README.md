@@ -243,6 +243,56 @@ The deployed Endpoint passed an end-to-end OpenCode smoke test on held-out
 paper `2604.11004`: it executed two `hf papers` Bash calls, returned structured
 output, and matched both expected URLs.
 
+### Resumable production batches on HF Jobs
+
+The original `nielsr/paper-url-extraction-v1` dataset is no longer an unseen
+canary source: its train split supplied SFT data and its validation and test
+splits supplied the paired evaluations. `prepare_canary.py` instead reads the
+private `huggingface/community-science-llm-traces` URL-extraction shards,
+parses the JSON object from each `output_raw` value, canonicalizes the
+`arxiv_id`, and excludes IDs present in any original split. Because the trace
+dataset contains repeated model calls, it accepts a field only when at least
+three traces agree with at least 60% support.
+
+The current trace snapshot has 2,039 rows and 201 valid arXiv IDs. Six overlap
+the original dataset, leaving 195 unseen papers; 168 have consensus labels for
+both URL fields. A small canary can be balanced across papers with both URLs,
+GitHub only, project page only, and neither:
+
+```bash
+uv run --extra traces python prepare_canary.py \
+  --source-parquet data/step_1_url_extraction/*.parquet \
+  --limit 8 \
+  --output canary-v1.jsonl
+hf buckets cp canary-v1.jsonl \
+  hf://buckets/nielsr/jobs-artifacts/qwen35-4b-url-agent-production/canary-v1-input.jsonl
+```
+
+The production batch module runs OpenCode on CPU while the managed L4
+Endpoint performs inference. It atomically checkpoints every paper to the
+mounted bucket, skips existing results after a restart, and optionally
+publishes the completed results and summary to a private Hub dataset:
+
+```bash
+hf jobs run \
+  --flavor cpu-upgrade \
+  --timeout 2h \
+  --secrets HF_TOKEN \
+  --env HF_ENDPOINT_URL=https://your-endpoint.us-east-1.aws.endpoints.huggingface.cloud \
+  --volume hf://buckets/nielsr/jobs-artifacts:/artifacts \
+  --detach \
+  ghcr.io/astral-sh/uv:python3.12-bookworm-slim \
+  uv run \
+  --with 'url-extraction[traces] @ https://github.com/NielsRogge/url-extraction/archive/refs/heads/main.zip' \
+  python -m url_extraction_agent.batch \
+  --input /artifacts/qwen35-4b-url-agent-production/canary-v1-input.jsonl \
+  --output /artifacts/qwen35-4b-url-agent-production/canary-v1-results.jsonl \
+  --output-repo nielsr/qwen35-4b-url-agent-production
+```
+
+Pass `--retry-incomplete` only when intentionally rerunning incomplete
+episodes. Completed records remain deduplicated by arXiv ID.
+
 ### Optional Apple-silicon smoke runtime
 
 MLX was used only to prove that the merged checkpoint could run locally

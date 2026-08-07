@@ -6,9 +6,20 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = []
 
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["url_extraction_agent*"]
+
+[tool.setuptools.package-data]
+url_extraction_agent = ["prompts/*.txt"]
+
 [project.optional-dependencies]
 traces = [
     "datasets>=4.0.0",
+    "huggingface-hub>=1.13.0",
     "httpx>=0.27.0",
     "opencode-ai==0.1.0a36",
     "pydantic>=2.10.0,<2.13",
