@@ -271,7 +271,17 @@ hf buckets cp canary-v1.jsonl \
 The production batch module runs OpenCode on CPU while the managed L4
 Endpoint performs inference. It atomically checkpoints every paper to the
 mounted bucket, skips existing results after a restart, and optionally
-publishes the completed results and summary to a private Hub dataset:
+publishes the completed results and summary to a private Hub dataset. Build a
+wheel and store it under a revision directory so Jobs install immutable code
+without requiring access to the private GitHub repository:
+
+```bash
+uv build --wheel --out-dir /tmp/url-agent-wheel
+hf buckets cp /tmp/url-agent-wheel/url_extraction-0.1.0-py3-none-any.whl \
+  hf://buckets/nielsr/jobs-artifacts/qwen35-4b-url-agent-production/packages/REVISION/url_extraction-0.1.0-py3-none-any.whl
+```
+
+Run that pinned wheel on a CPU Job:
 
 ```bash
 hf jobs run \
@@ -283,7 +293,7 @@ hf jobs run \
   --detach \
   ghcr.io/astral-sh/uv:python3.12-bookworm-slim \
   uv run \
-  --with 'url-extraction[traces] @ https://github.com/NielsRogge/url-extraction/archive/refs/heads/main.zip' \
+  --with 'url-extraction[traces] @ file:///artifacts/qwen35-4b-url-agent-production/packages/REVISION/url_extraction-0.1.0-py3-none-any.whl' \
   python -m url_extraction_agent.batch \
   --input /artifacts/qwen35-4b-url-agent-production/canary-v1-input.jsonl \
   --output /artifacts/qwen35-4b-url-agent-production/canary-v1-results.jsonl \
