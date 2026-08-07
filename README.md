@@ -309,6 +309,18 @@ hf jobs run \
 Pass `--retry-incomplete` only when intentionally rerunning incomplete
 episodes. Completed records remain deduplicated by arXiv ID.
 
+After a full run, use the checked-in finalizer to verify that inputs and results
+contain the same unique arXiv IDs and to recompute enriched, provenance-aware
+scores without another inference call:
+
+```bash
+uv run --extra traces python finalize_evaluation.py \
+  --input unseen-v2-input.jsonl \
+  --results unseen-v2-first-pass-results.jsonl \
+  --output-results unseen-v2-final-results.jsonl \
+  --output-summary unseen-v2-final-summary.json
+```
+
 The balanced 20-paper canary produced structured findings for 19 papers and
 completed the full research protocol for 15. After enriching the trace labels
 with current HF metadata and enforcing URL-field semantics, the unchanged
