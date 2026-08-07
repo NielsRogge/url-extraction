@@ -1,4 +1,5 @@
 from run_endpoint_agent import attempt_from_episode, endpoint_config, unscored_row
+from url_extraction_agent.opencode_endpoint import wait_for_endpoint
 from url_extraction_agent.schema import PaperCandidate
 
 
@@ -55,3 +56,32 @@ def test_attempt_from_episode_preserves_findings_and_tool_health():
     assert attempt.attempt_complete
     assert str(attempt.findings.github_url) == "https://github.com/example/repo"
     assert attempt.tool_events[0].success
+
+
+def test_endpoint_warmup_retries_before_episode_clock(monkeypatch):
+    class Response:
+        def __init__(self, status_code):
+            self.status_code = status_code
+            self.is_success = status_code == 200
+
+        def raise_for_status(self):
+            raise AssertionError("unexpected authentication failure")
+
+    class Client:
+        def __init__(self, **kwargs):
+            self.responses = iter([Response(503), Response(200)])
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def get(self, *args, **kwargs):
+            return next(self.responses)
+
+    monotonic = iter([0.0, 0.0, 0.0, 1.0])
+    monkeypatch.setattr("url_extraction_agent.opencode_endpoint.httpx.Client", Client)
+    monkeypatch.setattr("url_extraction_agent.opencode_endpoint.time.monotonic", lambda: next(monotonic))
+    monkeypatch.setattr("url_extraction_agent.opencode_endpoint.time.sleep", lambda _: None)
+    wait_for_endpoint("https://endpoint.example", "secret", 10)

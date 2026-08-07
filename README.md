@@ -262,15 +262,17 @@ GitHub only, project page only, and neither:
 ```bash
 uv run --extra traces python prepare_canary.py \
   --source-parquet data/step_1_url_extraction/*.parquet \
-  --limit 8 \
+  --limit 20 \
   --output canary-v1.jsonl
 hf buckets cp canary-v1.jsonl \
   hf://buckets/nielsr/jobs-artifacts/qwen35-4b-url-agent-production/canary-v1-input.jsonl
 ```
 
 The production batch module runs OpenCode on CPU while the managed L4
-Endpoint performs inference. It atomically checkpoints every paper to the
-mounted bucket, skips existing results after a restart, and optionally
+Endpoint performs inference. It first wakes the Endpoint and waits up to 15
+minutes for `/health`, keeping cold-start time outside every paper's episode
+budget. It atomically checkpoints every paper to the mounted bucket, skips
+existing results after a restart, and optionally
 publishes the completed results and summary to a private Hub dataset. Build a
 wheel and store it under a revision directory so Jobs install immutable code
 without requiring access to the private GitHub repository:

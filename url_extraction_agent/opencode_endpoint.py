@@ -343,6 +343,31 @@ def install_opencode(destination: Path) -> Path:
     return destination
 
 
+def wait_for_endpoint(endpoint_url: str, token: str, timeout: float) -> None:
+    """Wake a scaled-to-zero Endpoint before starting any episode timers."""
+    deadline = time.monotonic() + timeout
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "X-Scale-Up-Timeout": str(min(600, max(1, int(timeout)))),
+    }
+    last_status: int | None = None
+    with httpx.Client(timeout=httpx.Timeout(min(timeout, 610), connect=30)) as client:
+        while time.monotonic() < deadline:
+            try:
+                response = client.get(endpoint_url.rstrip("/") + "/health", headers=headers)
+                last_status = response.status_code
+                if response.is_success:
+                    return
+                if response.status_code in {401, 403}:
+                    response.raise_for_status()
+            except (httpx.TimeoutException, httpx.NetworkError):
+                pass
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                time.sleep(min(10, remaining))
+    raise TimeoutError(f"Endpoint did not become healthy within {timeout:g} seconds (last status: {last_status})")
+
+
 async def run_one(
     client: AsyncOpencode,
     candidate: PaperCandidate,
@@ -475,6 +500,7 @@ async def run_candidates(
     candidates: list[PaperCandidate],
     on_result: Callable[[AgentAttempt], Awaitable[None]] | None = None,
 ) -> list[AgentAttempt]:
+    wait_for_endpoint(args.endpoint_url, os.environ["HF_TOKEN"], args.endpoint_startup_timeout)
     config = endpoint_config(args.endpoint_url, args.model_id, args.provider_id)
     config["provider"][args.provider_id]["options"]["apiKey"] = os.environ["HF_TOKEN"]
     os.environ["OPENCODE_CONFIG_CONTENT"] = json.dumps(config)

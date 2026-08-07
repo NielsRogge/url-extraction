@@ -60,6 +60,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--concurrency", type=int, default=1)
     parser.add_argument("--episode-timeout", type=float, default=180)
     parser.add_argument("--request-timeout", type=float, default=240)
+    parser.add_argument("--endpoint-startup-timeout", type=float, default=900)
     parser.add_argument("--max-tool-calls", type=int, default=15)
     args = parser.parse_args()
     if not args.endpoint_url:
