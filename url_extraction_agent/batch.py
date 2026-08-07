@@ -98,6 +98,10 @@ def result_record(source: dict[str, Any], attempt: AgentAttempt) -> dict[str, An
             "project_page_urls": source.get("reference_project_page_urls"),
             "sources": source.get("reference_sources"),
         },
+        "label_quality": {
+            "github": source.get("github_label_quality"),
+            "project_page": source.get("project_page_label_quality"),
+        },
         "trace_consensus": source.get("trace_consensus"),
         "field_scores": scores,
         "exact_match": bool(scoreable) and all(scoreable),
@@ -111,6 +115,24 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         for name in ("github", "project_page")
     }
     complete_rows = [row for row in rows if row["attempt"]["attempt_complete"]]
+    quality_breakdown: dict[str, dict[str, dict[str, int]]] = {}
+    for name in ("github", "project_page"):
+        quality_metrics: dict[str, dict[str, int]] = {}
+        for row in rows:
+            quality = (row.get("label_quality") or {}).get(name) or "legacy_unspecified"
+            score = row["field_scores"].get(name)
+            if score is None:
+                continue
+            metrics = quality_metrics.setdefault(
+                quality,
+                {"correct": 0, "total": 0, "complete_correct": 0, "complete_total": 0},
+            )
+            metrics["correct"] += bool(score)
+            metrics["total"] += 1
+            if row["attempt"]["attempt_complete"]:
+                metrics["complete_correct"] += bool(score)
+                metrics["complete_total"] += 1
+        quality_breakdown[name] = quality_metrics
     return {
         "episodes": len(rows),
         "structured_episodes": sum(row["attempt"].get("findings") is not None for row in rows),
@@ -130,6 +152,7 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
             }
             for name, values in fields.items()
         },
+        "label_quality": quality_breakdown,
         "failure_reasons": dict(
             Counter(row["attempt"].get("failure_reason") for row in rows if row["attempt"].get("failure_reason"))
         ),

@@ -80,12 +80,14 @@ def test_atomic_checkpoint_and_summary(tmp_path: Path):
             "arxiv_id": "2501.00001",
             "attempt": {"attempt_complete": True, "failure_reason": None},
             "field_scores": {"github": True, "project_page": False},
+            "label_quality": {"github": "hf_metadata", "project_page": "trace_consensus"},
             "exact_match": False,
         },
         {
             "arxiv_id": "2501.00002",
             "attempt": {"attempt_complete": False, "failure_reason": "timeout"},
             "field_scores": {"github": True, "project_page": True},
+            "label_quality": {"github": "trace_consensus", "project_page": "trace_consensus"},
             "exact_match": True,
         },
     ]
@@ -102,6 +104,30 @@ def test_atomic_checkpoint_and_summary(tmp_path: Path):
         "fields": {
             "github": {"correct": 2, "total": 2, "complete_correct": 1, "complete_total": 1},
             "project_page": {"correct": 1, "total": 2, "complete_correct": 0, "complete_total": 1},
+        },
+        "label_quality": {
+            "github": {
+                "hf_metadata": {
+                    "correct": 1,
+                    "total": 1,
+                    "complete_correct": 1,
+                    "complete_total": 1,
+                },
+                "trace_consensus": {
+                    "correct": 1,
+                    "total": 1,
+                    "complete_correct": 0,
+                    "complete_total": 0,
+                },
+            },
+            "project_page": {
+                "trace_consensus": {
+                    "correct": 1,
+                    "total": 2,
+                    "complete_correct": 0,
+                    "complete_total": 1,
+                }
+            },
         },
         "failure_reasons": {"timeout": 1},
     }
