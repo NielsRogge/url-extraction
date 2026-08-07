@@ -124,6 +124,95 @@ and invalid/hallucinated URL rate. Merge or serve the adapter behind OpenCode
 only after it improves held-out results. If SFT plateaus, use the existing
 `train_opencode.py` for harness-level GRPO.
 
+`evaluate_vllm.py` runs that comparison on one GPU. It serves the base model
+and LoRA together with vLLM, points OpenCode's OpenAI-compatible provider at
+the local server, and publishes resumable episode records plus a summary to a
+private Hub dataset. The first training run attached LoRA tensors to the
+unused vision tower; their B matrices remained exactly zero, so the evaluator
+verifies that fact and removes only those inert tensors before vLLM loads the
+adapter.
+
+```bash
+hf jobs uv run \
+  --image huggingface/trl \
+  --flavor l4x1 \
+  --timeout 4h \
+  --secrets HF_TOKEN \
+  --volume hf://buckets/nielsr/jobs-artifacts:/artifacts \
+  --detach \
+  evaluate_vllm.py \
+  --limit 50 \
+  --concurrency 2 \
+  --episode-timeout 180 \
+  --max-tool-calls 15 \
+  --max-model-len 65536 \
+  --max-output-tokens 1024 \
+  --output /artifacts/qwen35-4b-url-agent-eval/validation-v2-64k.jsonl \
+  --output-repo nielsr/qwen35-4b-url-agent-eval
+```
+
+The 64k context applies to the whole multi-turn conversation; the 1,024-token
+limit applies to each tool-selection or final-answer turn. Accepted teacher
+traces used a median of 3 tool calls and a maximum of 15, which is why the
+evaluation watchdog uses 15 rather than allowing runaway research loops.
+
+The completed 50-paper paired validation run improved field accuracy from
+**64% for the base model to 81% for the SFT adapter**. Exact paper-level match
+improved from 28/50 to 35/50, while mean tool calls fell from 5.20 to 3.56.
+The underlying 100 episode records are in
+[`nielsr/qwen35-4b-url-agent-eval`](https://huggingface.co/datasets/nielsr/qwen35-4b-url-agent-eval),
+and the completed Job is
+[`6a75ab25da2af92a634ee9d7`](https://huggingface.co/jobs/nielsr/6a75ab25da2af92a634ee9d7).
+
+After the held-out adapter comparison passes, merge the LoRA into a standalone
+Transformers checkpoint on a GPU Job:
+
+```bash
+hf jobs uv run \
+  --flavor l4x1 \
+  --timeout 2h \
+  --secrets HF_TOKEN \
+  merge_adapter.py
+```
+
+The merge verifies that the adapter belongs to the requested base model, uses
+PEFT's safe merge, and publishes a private model by default. The evaluation is
+deliberately the gate for this step: do not package a model that has not
+improved over the unfine-tuned baseline. This run published the standalone
+[`nielsr/qwen35-4b-url-agent-merged`](https://huggingface.co/nielsr/qwen35-4b-url-agent-merged)
+checkpoint from Job
+[`6a75b6a1da2af92a634eea37`](https://huggingface.co/jobs/nielsr/6a75b6a1da2af92a634eea37).
+
+On an Apple-silicon Mac, convert the merged model to a local 4-bit MLX model
+and serve its OpenAI-compatible endpoint:
+
+```bash
+uv run --extra local convert_mlx.py
+uv run --extra local mlx_lm.server \
+  --model artifacts/qwen35-4b-url-agent-mlx-4bit \
+  --host 127.0.0.1 \
+  --port 8080 \
+  --max-tokens 1024
+```
+
+Point an OpenCode `@ai-sdk/openai-compatible` provider at
+`http://127.0.0.1:8080/v1` and configure its model ID as `default_model`.
+MLX is used for the final laptop runtime because vLLM requires CUDA; vLLM
+remains the reproducible GPU serving backend for the HF Jobs evaluation.
+The checked-in example can be selected without replacing an existing OpenCode
+configuration:
+
+```bash
+export OPENCODE_CONFIG="$PWD/opencode.local.example.json"
+opencode
+```
+
+The checked-in converter also corrects Qwen3.5's generated MLX stop-token
+metadata so the server stops on `<|im_end|>` instead of continuing to its
+per-turn token limit. A real local OpenCode smoke test on held-out paper
+`2604.11004` completed in 29 seconds, used Bash plus structured output, and
+matched both expected URLs.
+
 ## Harness-level GRPO (optional third stage)
 
 This repository adapts TRL's harness-training example to
