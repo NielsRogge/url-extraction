@@ -124,6 +124,45 @@ and invalid/hallucinated URL rate. Merge or serve the adapter behind OpenCode
 only after it improves held-out results. If SFT plateaus, use the existing
 `train_opencode.py` for harness-level GRPO.
 
+The published Qwen3.5-4B adapter was evaluated on 25 scoreable validation
+papers after excluding all 102 paper IDs present in the training traces. The
+completed evaluation used the real OpenCode tool loop with the adapter loaded
+directly in vLLM on an HF Job:
+
+| Metric | Result |
+|---|---:|
+| Canonical URL accuracy | 5/29 (17.2%) |
+| Episodes with all scoreable URLs correct | 3/25 (12.0%) |
+| Episodes using tools | 25/25 (100.0%) |
+| Episodes with a successful tool | 24/25 (96.0%) |
+| Clean stops | 3/25 (12.0%) |
+| Research-policy complete | 3/25 (12.0%) |
+| Recovery after a failed tool | 2/4 (50.0%) |
+| Total / failed tool calls | 63 / 6 |
+
+Artifacts and provenance are published in
+[`nielsr/qwen35-4b-url-agent-eval`](https://huggingface.co/datasets/nielsr/qwen35-4b-url-agent-eval).
+The resumed training job
+[`6a74eedada2af92a634edbbf`](https://huggingface.co/jobs/nielsr/6a74eedada2af92a634edbbf)
+completed all 38 steps, and evaluation job
+[`6a75065ada2af92a634edc95`](https://huggingface.co/jobs/nielsr/6a75065ada2af92a634edc95)
+produced these results.
+
+SFT is **not sufficient for deployment**. It reliably learned to begin
+research and use tools, but usually failed to stop and submit validated
+findings. Targeted OpenEnv/GRPO is justified using this adapter as the initial
+policy. The reward should strongly require a valid terminal action and
+canonical URL correctness, penalize unnecessary repeated research and context
+compaction, and retain partial credit for required metadata inspection and
+recovery after tool errors.
+
+The adapter currently has no Hugging Face Inference Provider mapping, and the
+`huggingface` organization has no enabled provider for `Qwen/Qwen3.5-4B`.
+Router requests with `--hf-bill-to huggingface` therefore return
+`model_not_supported` and would not evaluate this adapter. The completed run
+served it directly through vLLM; the billing flag is a no-op for that local
+provider until a compatible provider or dedicated endpoint is enabled.
+
 ## Harness-level GRPO (optional third stage)
 
 This repository adapts TRL's harness-training example to

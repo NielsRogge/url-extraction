@@ -289,7 +289,9 @@ def free_port() -> int:
 
 
 @asynccontextmanager
-async def opencode_server(base_url: str | None, command: str) -> AsyncIterator[str]:
+async def opencode_server(
+    base_url: str | None, command: str, *, custom_structured_output: bool = False
+) -> AsyncIterator[str]:
     if base_url:
         yield base_url.rstrip("/")
         return
@@ -298,10 +300,33 @@ async def opencode_server(base_url: str | None, command: str) -> AsyncIterator[s
         raise RuntimeError(f"OpenCode executable not found: {command}")
     port = free_port()
     workspace = tempfile.TemporaryDirectory(prefix="url-traces-")
+    if custom_structured_output:
+        tools_dir = Path(workspace.name) / ".opencode" / "tools"
+        tools_dir.mkdir(parents=True)
+        (tools_dir / "StructuredOutput.ts").write_text(
+            "import { tool } from \"@opencode-ai/plugin\"\n\n"
+            "export default tool({\n"
+            "  description: \"Submit the final validated URL findings and stop.\",\n"
+            "  args: {\n"
+            "    reasoning: tool.schema.string(),\n"
+            "    github_url: tool.schema.string().nullable().optional(),\n"
+            "    project_page_url: tool.schema.string().nullable().optional(),\n"
+            "  },\n"
+            "  async execute(args) { return JSON.stringify(args) },\n"
+            "})\n"
+        )
+    server_env = {
+        **os.environ,
+        "XDG_DATA_HOME": str(Path(workspace.name) / ".local" / "share"),
+        "XDG_STATE_HOME": str(Path(workspace.name) / ".local" / "state"),
+    }
+    server_log_path = Path(workspace.name) / "opencode-server.log"
+    server_log = server_log_path.open("w")
     process = subprocess.Popen(  # noqa: ASYNC220 - startup is immediate; process remains asynchronous
         [executable, "serve", "--hostname", "127.0.0.1", "--port", str(port)],
         cwd=workspace.name,
-        stdout=subprocess.DEVNULL,
+        env=server_env,
+        stdout=server_log,
         stderr=subprocess.STDOUT,
     )
     url = f"http://127.0.0.1:{port}"
@@ -309,7 +334,11 @@ async def opencode_server(base_url: str | None, command: str) -> AsyncIterator[s
         async with httpx.AsyncClient() as health:
             for _ in range(100):
                 if process.poll() is not None:
-                    raise RuntimeError(f"OpenCode exited during startup with status {process.returncode}")
+                    server_log.flush()
+                    details = server_log_path.read_text()[-4_000:]
+                    raise RuntimeError(
+                        f"OpenCode exited during startup with status {process.returncode}: {details}"
+                    )
                 try:
                     response = await health.get(f"{url}/global/health", timeout=1)
                     if response.is_success:
@@ -326,6 +355,7 @@ async def opencode_server(base_url: str | None, command: str) -> AsyncIterator[s
             process.wait(timeout=5)
         except subprocess.TimeoutExpired:
             process.kill()
+        server_log.close()
         workspace.cleanup()
 
 
@@ -336,6 +366,7 @@ async def run_one(
     *,
     episode_timeout: float,
     max_tool_calls: int,
+    native_structured_output: bool = True,
 ) -> dict[str, Any]:
     candidate = candidate_from_row(row)
     started = time.monotonic()
@@ -371,19 +402,25 @@ async def run_one(
     watchdog_task = asyncio.create_task(watchdog())
     try:
         async with asyncio.timeout(episode_timeout):
+            message_body: dict[str, Any] = {
+                "model": {"providerID": model[0], "modelID": model[1]},
+                "system": SYSTEM_PROMPT,
+                "tools": {name: name in ALLOWED_TOOLS for name in OPENCODE_TOOLS},
+                "parts": [{"type": "text", "text": user_prompt(candidate)}],
+            }
+            if native_structured_output:
+                message_body["format"] = {"type": "json_schema", "schema": findings_json_schema(), "retryCount": 2}
+            else:
+                message_body["parts"][0]["text"] += (
+                    "\nCall StructuredOutput with reasoning, github_url, and project_page_url exactly once when finished."
+                )
             response = await raw_json(
                 client,
                 "post",
                 f"/session/{session_id}/message",
-                {
-                    "model": {"providerID": model[0], "modelID": model[1]},
-                    "system": SYSTEM_PROMPT,
-                    "tools": {name: name in ALLOWED_TOOLS for name in OPENCODE_TOOLS},
-                    "format": {"type": "json_schema", "schema": findings_json_schema(), "retryCount": 2},
-                    "parts": [{"type": "text", "text": user_prompt(candidate)}],
-                },
+                message_body,
             )
-            if (response.get("info") or {}).get("error"):
+            if native_structured_output and (response.get("info") or {}).get("error"):
                 response = await raw_json(
                     client,
                     "post",
@@ -431,6 +468,15 @@ async def run_one(
             failure = failure or f"invalid structured output: {exc}"
     if findings is None:
         findings = findings_from_messages(messages)
+    if findings is None:
+        for event in reversed(events):
+            if event.tool_name.lower() == "structuredoutput":
+                try:
+                    findings = URLFindings.model_validate(event.tool_input)
+                except ValidationError:
+                    pass
+                else:
+                    break
     complete, incomplete_reason = (False, "no valid structured output")
     if findings is not None:
         complete, incomplete_reason = derive_attempt_complete(candidate, findings, events)
