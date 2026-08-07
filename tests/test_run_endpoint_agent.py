@@ -1,5 +1,5 @@
 from run_endpoint_agent import attempt_from_episode, endpoint_config, unscored_row
-from url_extraction_agent.opencode_endpoint import wait_for_endpoint
+from url_extraction_agent.opencode_endpoint import StructuredFindings, wait_for_endpoint
 from url_extraction_agent.schema import PaperCandidate
 
 
@@ -85,3 +85,15 @@ def test_endpoint_warmup_retries_before_episode_clock(monkeypatch):
     monkeypatch.setattr("url_extraction_agent.opencode_endpoint.time.monotonic", lambda: next(monotonic))
     monkeypatch.setattr("url_extraction_agent.opencode_endpoint.time.sleep", lambda _: None)
     wait_for_endpoint("https://endpoint.example", "secret", 10)
+
+
+def test_structured_findings_normalizes_urls_in_the_wrong_role():
+    findings = StructuredFindings.model_validate(
+        {
+            "reasoning": "Only unsupported pages were found.",
+            "github_url": "https://example.com/not-github",
+            "project_page_url": "https://github.com/example/repo",
+        }
+    )
+    assert findings.github_url is None
+    assert findings.project_page_url is None

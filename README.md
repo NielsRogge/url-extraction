@@ -252,7 +252,11 @@ private `huggingface/community-science-llm-traces` URL-extraction shards,
 parses the JSON object from each `output_raw` value, canonicalizes the
 `arxiv_id`, and excludes IDs present in any original split. Because the trace
 dataset contains repeated model calls, it accepts a field only when at least
-three traces agree with at least 60% support.
+three traces agree with at least 60% support. The trace outputs are pseudo-labels,
+not gold annotations: `prepare_canary.py` enriches them with current HF paper
+metadata, records the provenance for each field, and retains both URLs when the
+trace consensus and HF metadata disagree. Evaluation also rejects GitHub URLs
+outside `github.com` and project pages on GitHub, arXiv, or Hugging Face.
 
 The current trace snapshot has 2,039 rows and 201 valid arXiv IDs. Six overlap
 the original dataset, leaving 195 unseen papers; 168 have consensus labels for
@@ -304,6 +308,15 @@ hf jobs run \
 
 Pass `--retry-incomplete` only when intentionally rerunning incomplete
 episodes. Completed records remain deduplicated by arXiv ID.
+
+The balanced 20-paper canary produced structured findings for 19 papers and
+completed the full research protocol for 15. After enriching the trace labels
+with current HF metadata and enforcing URL-field semantics, the unchanged
+predictions scored 16/20 exact matches, 16/20 GitHub fields, and 20/20 project
+page fields. The original trace-only score was 8/20 exact because five GitHub
+repositories and two project pages present in current HF metadata were labelled
+null by the older teacher traces. This label audit is therefore required before
+using these traces as an evaluation or reward signal.
 
 ### Optional Apple-silicon smoke runtime
 

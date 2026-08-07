@@ -8,6 +8,7 @@ from prepare_canary import (
     canonical_arxiv_id,
     canonical_url,
     parse_output_raw,
+    reference_label,
     stratified_limit,
 )
 
@@ -34,6 +35,27 @@ def test_arxiv_metadata_parses_atom(monkeypatch):
 
     monkeypatch.setattr("prepare_canary.httpx.get", lambda *args, **kwargs: Response())
     assert arxiv_metadata("2501.00001") == ("A useful paper", "An abstract.")
+
+
+def test_hf_metadata_enriches_missing_trace_reference():
+    trace = {"value": None, "votes": 4, "total": 4, "agreement": 1.0}
+    label = reference_label(trace, "https://github.com/Example/Repo")
+    assert label == {
+        "value": "https://github.com/Example/Repo",
+        "accepted_values": ["https://github.com/Example/Repo"],
+        "quality": "hf_metadata",
+        "source": "hf_paper_metadata",
+    }
+
+
+def test_trace_hf_conflict_retains_both_official_candidates():
+    trace = {"value": "https://github.com/old/repo", "votes": 4, "total": 4, "agreement": 1.0}
+    label = reference_label(trace, "https://github.com/new/repo")
+    assert label["quality"] == "trace_hf_conflict"
+    assert label["accepted_values"] == [
+        "https://github.com/new/repo",
+        "https://github.com/old/repo",
+    ]
 
 
 def test_aggregate_excludes_seen_ids_and_requires_consensus():

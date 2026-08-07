@@ -20,9 +20,17 @@ from .opencode_endpoint import DEFAULT_MODEL_ID, DEFAULT_PROVIDER_ID, run_candid
 from .schema import AgentAttempt, PaperCandidate
 
 CANDIDATE_FIELDS = set(PaperCandidate.model_fields)
+SCOREABLE_LABEL_QUALITIES = {
+    "consensus",
+    "trace_consensus",
+    "hf_metadata",
+    "trace_hf_agreement",
+    "trace_hf_conflict",
+}
+INVALID_PROJECT_HOSTS = {"arxiv.org", "github.com", "hf.co", "huggingface.co"}
 
 
-def canonical_url(value: Any) -> str | None:
+def canonical_url(value: Any, field: str | None = None) -> str | None:
     text = str(value or "").strip()
     if not text:
         return None
@@ -31,10 +39,15 @@ def canonical_url(value: Any) -> str | None:
         return None
     host = parsed.netloc.lower().removeprefix("www.")
     path = "/".join(part for part in parsed.path.split("/") if part)
+    if field == "github" and host != "github.com":
+        return None
+    if field == "project_page" and host in INVALID_PROJECT_HOSTS:
+        return None
     if host == "github.com":
         parts = path.split("/")
-        if len(parts) >= 2:
-            path = "/".join(parts[:2])
+        if len(parts) < 2:
+            return None
+        path = "/".join(parts[:2])
     path = f"/{path.lower()}" if path else ""
     return urlunparse(("https", host, path, "", "", ""))
 
@@ -59,12 +72,15 @@ def write_jsonl_atomic(path: Path, rows: list[dict[str, Any]]) -> None:
 def score_attempt(source: dict[str, Any], attempt: AgentAttempt) -> dict[str, bool | None]:
     scores: dict[str, bool | None] = {}
     for name in ("github", "project_page"):
-        if source.get(f"{name}_label_quality") != "consensus":
+        if source.get(f"{name}_label_quality") not in SCOREABLE_LABEL_QUALITIES:
             scores[name] = None
             continue
-        predicted = canonical_url(getattr(attempt.findings, f"{name}_url", None)) if attempt.findings else None
-        expected = canonical_url(source.get(f"reference_{name}_url"))
-        scores[name] = predicted == expected
+        predicted = canonical_url(getattr(attempt.findings, f"{name}_url", None), name) if attempt.findings else None
+        expected_values = source.get(f"reference_{name}_urls")
+        if expected_values is None:
+            expected_values = [source.get(f"reference_{name}_url")]
+        expected = {canonical_url(value, name) for value in expected_values}
+        scores[name] = predicted in expected
     return scores
 
 
@@ -78,6 +94,9 @@ def result_record(source: dict[str, Any], attempt: AgentAttempt) -> dict[str, An
         "references": {
             "github_url": source.get("reference_github_url"),
             "project_page_url": source.get("reference_project_page_url"),
+            "github_urls": source.get("reference_github_urls"),
+            "project_page_urls": source.get("reference_project_page_urls"),
+            "sources": source.get("reference_sources"),
         },
         "trace_consensus": source.get("trace_consensus"),
         "field_scores": scores,
@@ -91,11 +110,26 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         name: [row["field_scores"][name] for row in rows if row["field_scores"].get(name) is not None]
         for name in ("github", "project_page")
     }
+    complete_rows = [row for row in rows if row["attempt"]["attempt_complete"]]
     return {
         "episodes": len(rows),
-        "complete_episodes": sum(bool(row["attempt"]["attempt_complete"]) for row in rows),
+        "structured_episodes": sum(row["attempt"].get("findings") is not None for row in rows),
+        "complete_episodes": len(complete_rows),
         "exact_match_episodes": sum(bool(row["exact_match"]) for row in rows),
-        "fields": {name: {"correct": sum(values), "total": len(values)} for name, values in fields.items()},
+        "complete_exact_match_episodes": sum(bool(row["exact_match"]) for row in complete_rows),
+        "fields": {
+            name: {
+                "correct": sum(values),
+                "total": len(values),
+                "complete_correct": sum(
+                    bool(row["field_scores"].get(name))
+                    for row in complete_rows
+                    if row["field_scores"].get(name) is not None
+                ),
+                "complete_total": sum(row["field_scores"].get(name) is not None for row in complete_rows),
+            }
+            for name, values in fields.items()
+        },
         "failure_reasons": dict(
             Counter(row["attempt"].get("failure_reason") for row in rows if row["attempt"].get("failure_reason"))
         ),

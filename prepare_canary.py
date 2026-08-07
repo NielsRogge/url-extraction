@@ -164,21 +164,61 @@ def arxiv_metadata(arxiv_id: str) -> tuple[str, str]:
     return title, abstract
 
 
-def paper_metadata(api: HfApi, arxiv_id: str) -> tuple[str, str]:
+def paper_metadata(api: HfApi, arxiv_id: str) -> tuple[str, str, str | None, str | None]:
     try:
         paper = api.paper_info(arxiv_id)
-        return paper.title.strip(), paper.summary.strip()
+        return (
+            paper.title.strip(),
+            paper.summary.strip(),
+            canonical_url(getattr(paper, "github_repo", None)),
+            canonical_url(getattr(paper, "project_page", None)),
+        )
     except HfHubHTTPError as error:
         if error.response is None or error.response.status_code != 404:
             raise
-        return arxiv_metadata(arxiv_id)
+        title, abstract = arxiv_metadata(arxiv_id)
+        return title, abstract, None, None
+
+
+def reference_label(trace: dict[str, Any], hub_value: str | None) -> dict[str, Any]:
+    trace_value = canonical_url(trace["value"])
+    hub_value = canonical_url(hub_value)
+    if hub_value is None:
+        return {
+            "value": trace_value,
+            "accepted_values": [trace_value],
+            "quality": "trace_consensus",
+            "source": "community_science_trace_consensus",
+        }
+    if trace_value is None:
+        return {
+            "value": hub_value,
+            "accepted_values": [hub_value],
+            "quality": "hf_metadata",
+            "source": "hf_paper_metadata",
+        }
+    if canonical_url(trace_value) == canonical_url(hub_value):
+        return {
+            "value": hub_value,
+            "accepted_values": [hub_value],
+            "quality": "trace_hf_agreement",
+            "source": "trace_and_hf_metadata",
+        }
+    return {
+        "value": hub_value,
+        "accepted_values": [hub_value, trace_value],
+        "quality": "trace_hf_conflict",
+        "source": "hf_metadata_with_trace_alternative",
+    }
 
 
 def add_paper_metadata(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     api = HfApi()
     candidates: list[dict[str, Any]] = []
     for index, row in enumerate(rows):
-        title, abstract = paper_metadata(api, row["arxiv_id"])
+        title, abstract, hub_github, hub_project_page = paper_metadata(api, row["arxiv_id"])
+        github = reference_label(row["github"], hub_github)
+        project_page = reference_label(row["project_page"], hub_project_page)
         candidates.append(
             {
                 "paper_id": -(index + 1),
@@ -191,10 +231,16 @@ def add_paper_metadata(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "known_project_page_url": None,
                 "priority": 0,
                 "priority_source": "community_science_trace_consensus",
-                "reference_github_url": row["github"]["value"],
-                "reference_project_page_url": row["project_page"]["value"],
-                "github_label_quality": "consensus",
-                "project_page_label_quality": "consensus",
+                "reference_github_url": github["value"],
+                "reference_project_page_url": project_page["value"],
+                "reference_github_urls": github["accepted_values"],
+                "reference_project_page_urls": project_page["accepted_values"],
+                "github_label_quality": github["quality"],
+                "project_page_label_quality": project_page["quality"],
+                "reference_sources": {
+                    "github": github["source"],
+                    "project_page": project_page["source"],
+                },
                 "trace_consensus": {
                     "github": {key: row["github"][key] for key in ("votes", "total", "agreement")},
                     "project_page": {key: row["project_page"][key] for key in ("votes", "total", "agreement")},

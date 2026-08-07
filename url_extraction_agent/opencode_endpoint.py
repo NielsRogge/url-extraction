@@ -22,7 +22,7 @@ from urllib.parse import urlparse
 
 import httpx
 from opencode_ai import AsyncOpencode
-from pydantic import BaseModel, ConfigDict, StringConstraints, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, StringConstraints, ValidationError, field_validator, model_validator
 
 from .schema import AgentAttempt, PaperCandidate, ToolEvent, URLFindings
 
@@ -88,6 +88,28 @@ class StructuredFindings(BaseModel):
         if isinstance(value, str) and value.strip().lower() in {"", "null", "none"}:
             return None
         return value
+
+    @model_validator(mode="before")
+    @classmethod
+    def enforce_url_roles(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        normalized = dict(value)
+        github = urlparse(str(normalized.get("github_url") or ""))
+        github_host = github.netloc.lower().removeprefix("www.")
+        github_parts = [part for part in github.path.split("/") if part]
+        if normalized.get("github_url") and (github_host != "github.com" or len(github_parts) < 2):
+            normalized["github_url"] = None
+        project = urlparse(str(normalized.get("project_page_url") or ""))
+        project_host = project.netloc.lower().removeprefix("www.")
+        if normalized.get("project_page_url") and project_host in {
+            "arxiv.org",
+            "github.com",
+            "hf.co",
+            "huggingface.co",
+        }:
+            normalized["project_page_url"] = None
+        return normalized
 
 
 def endpoint_config(base_url: str, model_id: str, provider_id: str = DEFAULT_PROVIDER_ID) -> dict[str, Any]:
