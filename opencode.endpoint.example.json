@@ -1,0 +1,28 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "enabled_providers": [
+    "hf-endpoint"
+  ],
+  "provider": {
+    "hf-endpoint": {
+      "models": {
+        "nielsr/qwen35-4b-url-agent-merged": {
+          "limit": {
+            "context": 65536,
+            "output": 1024
+          },
+          "name": "Qwen3.5 4B URL Agent SFT"
+        }
+      },
+      "name": "Hugging Face Inference Endpoint",
+      "npm": "@ai-sdk/openai-compatible",
+      "options": {
+        "apiKey": "{env:HF_TOKEN}",
+        "baseURL": "{env:HF_ENDPOINT_BASE_URL}",
+        "headers": {
+          "X-Scale-Up-Timeout": "600"
+        }
+      }
+    }
+  }
+}

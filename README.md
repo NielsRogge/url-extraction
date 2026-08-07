@@ -164,6 +164,18 @@ The underlying 100 episode records are in
 and the completed Job is
 [`6a75ab25da2af92a634ee9d7`](https://huggingface.co/jobs/nielsr/6a75ab25da2af92a634ee9d7).
 
+The untouched 42-paper test split independently confirmed the gain. Across
+the 84 paired OpenCode episodes, the SFT adapter improved field accuracy from
+**56.0% to 76.2%** and exact paper-level match from **17/42 to 28/42**
+(+26.2 percentage points). GitHub accuracy rose from 30/42 to 35/42, project
+page accuracy from 17/42 to 29/42, complete episodes from 21/42 to 27/42, and
+mean tool calls fell from 6.24 to 3.98. Tool-call execution reliability was
+similar (96.2% base versus 95.2% SFT). The test records and machine-readable
+summary are published in
+[`nielsr/qwen35-4b-url-agent-eval`](https://huggingface.co/datasets/nielsr/qwen35-4b-url-agent-eval),
+and the completed test Job is
+[`6a75c0e03e1f34a7e32bd241`](https://huggingface.co/jobs/nielsr/6a75c0e03e1f34a7e32bd241).
+
 After the held-out adapter comparison passes, merge the LoRA into a standalone
 Transformers checkpoint on a GPU Job:
 
@@ -183,8 +195,59 @@ improved over the unfine-tuned baseline. This run published the standalone
 checkpoint from Job
 [`6a75b6a1da2af92a634eea37`](https://huggingface.co/jobs/nielsr/6a75b6a1da2af92a634eea37).
 
-On an Apple-silicon Mac, convert the merged model to a local 4-bit MLX model
-and serve its OpenAI-compatible endpoint:
+### Managed Inference Endpoint (recommended production runtime)
+
+`deploy_endpoint.py` creates an authenticated, OpenAI-compatible vLLM
+Inference Endpoint on one L4. It pins the current merged-model revision, caps
+the context at the evaluated 65,536 tokens, and scales to zero after 15 idle
+minutes. The script is idempotent and will report an existing endpoint rather
+than creating a duplicate.
+
+The `HF_TOKEN` used for deployment must grant read and write access to
+Inference Endpoints in the target namespace.
+
+```bash
+uv run deploy_endpoint.py
+hf endpoints describe qwen35-4b-url-agent-vllm --namespace nielsr
+```
+
+Use the stable URL returned by `hf endpoints describe` with the production
+OpenCode runner. The token remains an environment variable; it is never
+written to disk or included in output artifacts. The runner injects it only
+into the short-lived OpenCode server process.
+
+```bash
+export HF_ENDPOINT_URL="https://your-endpoint.us-east-1.aws.endpoints.huggingface.cloud"
+uv run --extra traces python run_endpoint_agent.py \
+  --input candidates.json \
+  --output attempts.json
+```
+
+For interactive OpenCode use, set `HF_ENDPOINT_BASE_URL` to the same URL with
+`/v1` appended and select the checked-in provider configuration:
+
+```bash
+export HF_ENDPOINT_BASE_URL="https://your-endpoint.us-east-1.aws.endpoints.huggingface.cloud/v1"
+export OPENCODE_CONFIG="$PWD/opencode.endpoint.example.json"
+opencode
+```
+
+The Endpoint is the intended hosted runtime. OpenCode still owns and executes
+the Bash, Read, Grep, Glob, and WebFetch tool loop; only model inference is
+remote. Scale-to-zero saves idle GPU cost but introduces a cold start, so a
+production caller should retry transient 502/503 responses with a bounded
+backoff. The provider sends `X-Scale-Up-Timeout: 600`, allowing Hugging Face's
+proxy to hold the first request while a scaled-to-zero replica starts.
+
+The deployed Endpoint passed an end-to-end OpenCode smoke test on held-out
+paper `2604.11004`: it executed two `hf papers` Bash calls, returned structured
+output, and matched both expected URLs.
+
+### Optional Apple-silicon smoke runtime
+
+MLX was used only to prove that the merged checkpoint could run locally
+without CUDA. On an Apple-silicon Mac, convert it to a local 4-bit model and
+serve its OpenAI-compatible endpoint:
 
 ```bash
 uv run --extra local convert_mlx.py
