@@ -24,7 +24,7 @@ import torch
 from huggingface_hub import HfApi, snapshot_download
 from peft import PeftConfig, PeftModel
 from safetensors import safe_open
-from transformers import AutoModelForImageTextToText, AutoTokenizer
+from transformers import AutoModelForImageTextToText, AutoProcessor, AutoTokenizer
 
 BASE_MODEL = "Qwen/Qwen3.5-4B"
 ADAPTER_ID = "nielsr/qwen35-4b-url-agent-lora"
@@ -112,6 +112,11 @@ def merge(args: argparse.Namespace) -> Path:
     model = model.merge_and_unload(safe_merge=True, progressbar=True)
     model.save_pretrained(output, safe_serialization=True, max_shard_size=args.max_shard_size)
     AutoTokenizer.from_pretrained(args.base_model).save_pretrained(output)
+    # vLLM initializes Qwen3.5's conditional-generation processor even for
+    # text-only requests. Preserve the base image/video processor metadata so
+    # the standalone merged repository can boot without reaching back to the
+    # base model repository.
+    AutoProcessor.from_pretrained(args.base_model).save_pretrained(output)
     (output / "README.md").write_text(model_card(args.base_model, args.adapter))
 
     api = HfApi(token=token)
