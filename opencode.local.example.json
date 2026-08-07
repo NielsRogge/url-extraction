@@ -1,0 +1,23 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "local-mlx/default_model",
+  "provider": {
+    "local-mlx": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Local MLX URL agent",
+      "options": {
+        "baseURL": "http://127.0.0.1:8080/v1",
+        "apiKey": "EMPTY"
+      },
+      "models": {
+        "default_model": {
+          "name": "Qwen3.5-4B URL agent (MLX 4-bit)",
+          "limit": {
+            "context": 65536,
+            "output": 1024
+          }
+        }
+      }
+    }
+  }
+}

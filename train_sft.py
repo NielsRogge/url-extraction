@@ -90,6 +90,20 @@ TOOLS = [
     },
 ]
 MAX_TOOL_CONTENT_CHARS = 8_000
+TEXT_LORA_TARGET_MODULES = [
+    "down_proj",
+    "gate_proj",
+    "in_proj_a",
+    "in_proj_b",
+    "in_proj_qkv",
+    "in_proj_z",
+    "k_proj",
+    "o_proj",
+    "out_proj",
+    "q_proj",
+    "up_proj",
+    "v_proj",
+]
 
 
 def load_records(path: Path | None, dataset_id: str | None, split: str) -> list[dict[str, Any]]:
@@ -204,7 +218,10 @@ def main(args: argparse.Namespace) -> None:
             lora_dropout=0.05,
             bias="none",
             task_type="CAUSAL_LM",
-            target_modules="all-linear",
+            # Qwen3.5ForConditionalGeneration also contains an unused vision
+            # tower. Explicit text-module names keep the adapter compatible
+            # with text-only vLLM and avoid storing inert visual LoRA tensors.
+            target_modules=TEXT_LORA_TARGET_MODULES,
         ),
         quantization_config=quantization,
         args=SFTConfig(
