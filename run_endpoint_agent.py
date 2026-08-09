@@ -10,40 +10,18 @@ import os
 from pathlib import Path
 from typing import Any
 
-import httpx
 from dotenv import load_dotenv
-from opencode_ai import AsyncOpencode
 
-from evaluate_vllm import opencode_server, run_one
-from url_extraction_agent.schema import AgentAttempt, PaperCandidate, ToolEvent, URLFindings
+from url_extraction_agent.opencode_endpoint import (
+    DEFAULT_MODEL_ID,
+    DEFAULT_PROVIDER_ID,
+    attempt_from_episode,
+    endpoint_config,
+    run_candidates,
+)
+from url_extraction_agent.schema import PaperCandidate
 
-DEFAULT_PROVIDER_ID = "hf-endpoint"
-DEFAULT_MODEL_ID = "nielsr/qwen35-4b-url-agent-merged"
-
-
-def endpoint_config(base_url: str, model_id: str, provider_id: str = DEFAULT_PROVIDER_ID) -> dict[str, Any]:
-    """Build a secret-free OpenCode provider config for an OpenAI-compatible Endpoint."""
-    return {
-        "$schema": "https://opencode.ai/config.json",
-        "enabled_providers": [provider_id],
-        "provider": {
-            provider_id: {
-                "npm": "@ai-sdk/openai-compatible",
-                "name": "Hugging Face Inference Endpoint",
-                "options": {
-                    "baseURL": base_url.rstrip("/") + "/v1",
-                    "apiKey": "{env:HF_TOKEN}",
-                    "headers": {"X-Scale-Up-Timeout": "600"},
-                },
-                "models": {
-                    model_id: {
-                        "name": "Qwen3.5 4B URL Agent SFT",
-                        "limit": {"context": 65_536, "output": 1_024},
-                    }
-                },
-            }
-        },
-    }
+__all__ = ["attempt_from_episode", "endpoint_config", "unscored_row"]
 
 
 def unscored_row(candidate: PaperCandidate) -> dict[str, Any]:
@@ -58,50 +36,6 @@ def unscored_row(candidate: PaperCandidate) -> dict[str, Any]:
         }
     )
     return row
-
-
-def attempt_from_episode(candidate: PaperCandidate, episode: dict[str, Any]) -> AgentAttempt:
-    findings = URLFindings.model_validate(episode["findings"]) if episode.get("findings") else None
-    return AgentAttempt(
-        paper_id=candidate.paper_id,
-        arxiv_id=candidate.arxiv_id,
-        findings=findings,
-        attempt_complete=bool(episode["attempt_complete"]),
-        failure_reason=episode.get("failure_reason"),
-        result_subtype="success" if findings is not None else "error",
-        tool_events=[ToolEvent.model_validate(event) for event in episode.get("tool_events", [])],
-    )
-
-
-async def run_candidates(args: argparse.Namespace, candidates: list[PaperCandidate]) -> list[AgentAttempt]:
-    config = endpoint_config(args.endpoint_url, args.model_id, args.provider_id)
-    # OpenCode does not expand {env:...} placeholders inside
-    # OPENCODE_CONFIG_CONTENT. Replace it only in this child-process config;
-    # unlike a config file or auth-store entry, it is never persisted.
-    config["provider"][args.provider_id]["options"]["apiKey"] = os.environ["HF_TOKEN"]
-    os.environ["OPENCODE_CONFIG_CONTENT"] = json.dumps(config)
-    async with (
-        opencode_server(args.opencode_binary) as base_url,
-        AsyncOpencode(
-            base_url=base_url,
-            timeout=httpx.Timeout(args.request_timeout, connect=10),
-            max_retries=1,
-        ) as client,
-    ):
-        semaphore = asyncio.Semaphore(args.concurrency)
-
-        async def run_candidate(candidate: PaperCandidate) -> AgentAttempt:
-            async with semaphore:
-                episode = await run_one(
-                    client,
-                    unscored_row(candidate),
-                    (args.provider_id, args.model_id),
-                    episode_timeout=args.episode_timeout,
-                    max_tool_calls=args.max_tool_calls,
-                )
-                return attempt_from_episode(candidate, episode)
-
-        return list(await asyncio.gather(*(run_candidate(candidate) for candidate in candidates)))
 
 
 def load_candidates(args: argparse.Namespace) -> list[PaperCandidate]:
@@ -126,6 +60,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--concurrency", type=int, default=1)
     parser.add_argument("--episode-timeout", type=float, default=180)
     parser.add_argument("--request-timeout", type=float, default=240)
+    parser.add_argument("--endpoint-startup-timeout", type=float, default=900)
     parser.add_argument("--max-tool-calls", type=int, default=15)
     args = parser.parse_args()
     if not args.endpoint_url:
