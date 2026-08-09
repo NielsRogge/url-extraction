@@ -317,8 +317,8 @@ scores without another inference call:
 uv run --extra traces python finalize_evaluation.py \
   --input unseen-v2-input.jsonl \
   --results unseen-v2-first-pass-results.jsonl \
-  --output-results unseen-v2-final-results.jsonl \
-  --output-summary unseen-v2-final-summary.json
+  --output-results unseen-v2-first-pass-final-results.jsonl \
+  --output-summary unseen-v2-first-pass-summary.json
 ```
 
 The balanced 20-paper canary produced structured findings for 19 papers and
@@ -329,6 +329,36 @@ page fields. The original trace-only score was 8/20 exact because five GitHub
 repositories and two project pages present in current HF metadata were labelled
 null by the older teacher traces. This label audit is therefore required before
 using these traces as an evaluation or reward signal.
+
+The complete unseen evaluation contains 168 papers and preserves its one-shot
+result before any retry. The immutable first pass and the separate operational
+artifact are both published in
+[`nielsr/qwen35-4b-url-agent-production`](https://huggingface.co/datasets/nielsr/qwen35-4b-url-agent-production):
+
+| Metric | Immutable first pass | One operational retry |
+| --- | ---: | ---: |
+| Exact paper-level match | 134/168 (79.8%) | 138/168 (82.1%) |
+| GitHub URL correct | 145/168 (86.3%) | 147/168 (87.5%) |
+| Project-page URL correct | 149/168 (88.7%) | 153/168 (91.1%) |
+| Structured output | 144/168 (85.7%) | 159/168 (94.6%) |
+| Full research protocol | 86/168 (51.2%) | 123/168 (73.2%) |
+| Error result | 24/168 (14.3%) | 9/168 (5.4%) |
+
+The first pass ran in
+[`6a75dc58da2af92a634eeb68`](https://huggingface.co/jobs/nielsr/6a75dc58da2af92a634eeb68).
+After freezing that raw artifact, Job
+[`6a7617bc3e1f34a7e32bd914`](https://huggingface.co/jobs/nielsr/6a7617bc3e1f34a7e32bd914)
+retried each of the 82 protocol-incomplete episodes exactly once in a separate
+file. The operational result is useful for production reliability, but it does
+not replace the one-shot benchmark.
+
+Label provenance remains important. On the operational artifact, GitHub
+accuracy was 40/40 for HF-metadata labels, 61/65 where traces and HF metadata
+agreed, 15/16 on trace/HF conflicts, and 31/47 for trace-only consensus labels.
+Project-page accuracy was respectively 14/14, 60/61, 3/3, and 76/90. Retries
+improved the high-confidence HF-backed groups while reducing accuracy on a few
+trace-only pseudo-labels, reinforcing that these results should not be treated
+as a gold benchmark without human adjudication.
 
 ### Optional Apple-silicon smoke runtime
 
