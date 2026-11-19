@@ -48,7 +48,6 @@ from datasets import load_dataset
 from huggingface_hub import HfApi, snapshot_download
 from opencode_ai import AsyncOpencode
 from pydantic import BaseModel, ConfigDict, HttpUrl, StringConstraints, ValidationError, field_validator
-from safetensors.torch import load_file, save_file
 
 DATASET_ID = "nielsr/paper-url-extraction-v1"
 ADAPTER_ID = "nielsr/qwen35-4b-url-agent-lora"
@@ -680,6 +679,8 @@ def start_vllm(args: argparse.Namespace, adapter_path: str) -> subprocess.Popen:
 
 def prepare_text_adapter(source: str, destination: Path) -> str:
     """Remove inert vision-tower tensors that text-only vLLM correctly rejects."""
+    from safetensors.torch import load_file, save_file
+
     source_path = Path(source)
     if destination.exists():
         shutil.rmtree(destination)

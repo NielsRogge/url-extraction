@@ -153,11 +153,21 @@ def candidate_from_row(row: dict[str, Any]) -> PaperCandidate:
     )
 
 
+def requested_qualities(row: dict[str, Any]) -> list[Any]:
+    return [row.get(f"{name}_label_quality") for name in ("github", "project_page") if bool(row[f"missing_{name}"])]
+
+
 def row_all_requested_scoreable(row: dict[str, Any]) -> bool:
-    qualities = [
-        row.get(f"{name}_label_quality") for name in ("github", "project_page") if bool(row[f"missing_{name}"])
-    ]
+    qualities = requested_qualities(row)
     return bool(qualities) and all(quality in SCORED_QUALITIES for quality in qualities)
+
+
+def row_any_requested_scoreable(row: dict[str, Any]) -> bool:
+    return any(quality in SCORED_QUALITIES for quality in requested_qualities(row))
+
+
+# Set from --accept-partial: also accept rows where only some requested fields have verified labels.
+ACCEPT_PARTIAL = False
 
 
 def tool_events(messages: list[dict[str, Any]]) -> list[ToolEvent]:
@@ -442,7 +452,8 @@ async def run_one(
         else {"fields": {}, "num_scoreable": 0, "all_scoreable_correct": False}
     )
     all_requested_scoreable = row_all_requested_scoreable(row)
-    accepted = findings is not None and complete and all_requested_scoreable and scoring["all_scoreable_correct"]
+    label_ok = all_requested_scoreable or (ACCEPT_PARTIAL and scoring["num_scoreable"] > 0)
+    accepted = findings is not None and complete and label_ok and scoring["all_scoreable_correct"]
     return {
         "version": 1,
         "paper_id": candidate.paper_id,
@@ -487,7 +498,11 @@ async def async_main(args: argparse.Namespace) -> None:
     configure_huggingface_billing(model, args.hf_bill_to)
     dataset = load_dataset(args.dataset, split=args.split)
     rows = [dict(row) for row in dataset]
-    if not args.include_unscoreable:
+    global ACCEPT_PARTIAL
+    ACCEPT_PARTIAL = args.accept_partial
+    if args.accept_partial:
+        rows = [row for row in rows if row_any_requested_scoreable(row)]
+    elif not args.include_unscoreable:
         rows = [row for row in rows if row_all_requested_scoreable(row)]
     rows = rows[args.start : args.start + args.limit]
     done = accepted_ids(args.output) if args.resume else set()
@@ -560,6 +575,11 @@ def parse_args() -> argparse.Namespace:
         "--include-unscoreable",
         action="store_true",
         help="Also research rows with unknown requested labels (never accepted for SFT)",
+    )
+    parser.add_argument(
+        "--accept-partial",
+        action="store_true",
+        help="Research rows with at least one verified requested label; accept when every verified field matches",
     )
     parser.add_argument("--no-resume", action="store_false", dest="resume")
     parser.set_defaults(resume=True)
