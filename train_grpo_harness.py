@@ -57,6 +57,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.request
 from contextlib import suppress
@@ -240,9 +241,38 @@ class OpenCodeCaptureSession:
             self.failure = f"infrastructure: {type(exc).__name__}: {exc}"
             logger.warning("rollout %s failed: %s", self.candidate.arxiv_id, self.failure)
             return 1
+        # Validate the capture now: a failed rollout (exit code 1) is dropped as unscorable, while an
+        # invalid capture from a "successful" one would stop the whole trainer.
+        try:
+            self.fetch_training_trace()
+        except Exception as exc:  # noqa: BLE001
+            session = self.factory.capture.registry.get(self.capture_id)
+            findings = []
+            if session is not None:
+                from openenv.core.harness.capture.export import export_session
+
+                level = session.capture_level or self.factory.capture.capture_level
+                findings = export_session(session, capture_level=level)["validation"]
+            self.failure = f"infrastructure: untrainable capture: {exc}"
+            logger.warning(
+                "rollout %s dropped: %s; findings=%s; opencode_errors=%s",
+                self.candidate.arxiv_id,
+                exc,
+                findings[:6],
+                self._provider_errors()[:2],
+            )
+            return 1
         if timed_out:
             raise TimeoutError(self.failure or "episode timed out")
         return 0
+
+    def _provider_errors(self) -> list[str]:
+        errors = []
+        for message in self.messages:
+            error = (message.get("info") or {}).get("error")
+            if error:
+                errors.append(str((error.get("data") or {}).get("message") or error)[:300])
+        return errors
 
     def fetch_training_trace(self):
         from openenv.core.harness.capture.contract import to_training_trace
@@ -411,16 +441,25 @@ class OpenCodeCaptureFactory:
         self.scratch_dir = scratch_dir
         self._capture = None
         self._capture_url: str | None = None
+        self._lock = threading.Lock()
 
     def __getstate__(self) -> dict[str, Any]:
         state = dict(self.__dict__)
         state["_capture"] = None
         state["_capture_url"] = None
+        state["_lock"] = None
         return state
 
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        self.__dict__.update(state)
+        self._lock = threading.Lock()
+
     def _ensure_capture(self) -> None:
-        if self._capture is not None:
-            return
+        with self._lock:
+            if self._capture is None:
+                self._start_capture()
+
+    def _start_capture(self) -> None:
         from openenv.core.harness.capture.runner import CaptureServer
 
         port = free_port()
