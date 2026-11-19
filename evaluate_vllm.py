@@ -884,14 +884,14 @@ def publish(args: argparse.Namespace, output_path: Path, summary_path: Path) -> 
     api.create_repo(args.output_repo, repo_type="dataset", private=True, exist_ok=True)
     api.upload_file(
         path_or_fileobj=str(output_path),
-        path_in_repo=f"{args.split}.jsonl",
+        path_in_repo=f"{args.tag}{args.split}.jsonl",
         repo_id=args.output_repo,
         repo_type="dataset",
         commit_message=f"Add {args.split} OpenCode evaluation episodes",
     )
     api.upload_file(
         path_or_fileobj=str(summary_path),
-        path_in_repo=f"{args.split}-summary.json",
+        path_in_repo=f"{args.tag}{args.split}-summary.json",
         repo_id=args.output_repo,
         repo_type="dataset",
         commit_message=f"Add {args.split} evaluation summary",
@@ -909,6 +909,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--adapter", default=ADAPTER_ID)
     parser.add_argument("--output", type=Path, default=Path("/artifacts/qwen35-4b-url-agent-eval/validation.jsonl"))
     parser.add_argument("--output-repo", default="nielsr/qwen35-4b-url-agent-eval")
+    parser.add_argument("--tag", default="", help="Prefix for published file names, e.g. 'sft-v2/'")
     parser.add_argument("--concurrency", type=int, default=2)
     parser.add_argument("--episode-timeout", type=float, default=240)
     parser.add_argument("--request-timeout", type=float, default=600)
