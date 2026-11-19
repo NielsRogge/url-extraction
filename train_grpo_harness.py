@@ -76,6 +76,7 @@ from evaluate_vllm import (  # noqa: E402 - shared harness definition with the e
     SYSTEM_PROMPT,
     URLFindings,
     candidate_from_row,
+    derive_attempt_complete,
     findings_from_messages,
     install_opencode,
     raw_json,
@@ -122,11 +123,20 @@ def any_requested_scoreable(row: dict[str, Any]) -> bool:
     )
 
 
-def load_rows(dataset: str, split: str, exclude_ids: set[str], limit: int | None, seed: int) -> list[dict[str, Any]]:
+def load_rows(
+    dataset: str,
+    split: str,
+    exclude_ids: set[str],
+    limit: int | None,
+    seed: int,
+    include_ids: set[str] | None = None,
+) -> list[dict[str, Any]]:
     from datasets import load_dataset
 
     rows = [dict(row) for row in load_dataset(dataset, split=split)]
     rows = [row for row in rows if any_requested_scoreable(row) and str(row["arxiv_id"]) not in exclude_ids]
+    if include_ids is not None:
+        rows = [row for row in rows if str(row["arxiv_id"]) in include_ids]
     random.Random(seed).shuffle(rows)
     return rows[:limit] if limit else rows
 
@@ -265,7 +275,13 @@ class OpenCodeCaptureSession:
         if violation:
             logger.warning("shortcut guard: %s on %s scores 0", violation, self.candidate.arxiv_id)
             return VerifyResult(env_reward=0.0, done=True)
-        return VerifyResult(env_reward=correctness(self.row, self.findings), done=True)
+        score = correctness(self.row, self.findings)
+        if self.factory.protocol_weight and self.findings is not None:
+            # Correct URLs found without following the research protocol earn only part of the credit,
+            # so the tool-efficiency bonus cannot be bought by skipping the paper or metadata checks.
+            complete, _ = derive_attempt_complete(self.candidate, self.findings, tool_events(self.messages))
+            score *= 1.0 - self.factory.protocol_weight * (not complete)
+        return VerifyResult(env_reward=score, done=True)
 
     def close(self) -> None:
         if self.process is not None:
@@ -481,8 +497,10 @@ class OpenCodeCaptureFactory:
         scratch_dir: str | None = None,
         purpose: str = "train",
         upstream_api_key_env: str | None = None,
+        protocol_weight: float = 0.0,
     ) -> None:
         self.purpose = purpose
+        self.protocol_weight = protocol_weight
         # Name of an environment variable, never the credential itself: the factory is pickled.
         self.upstream_api_key_env = upstream_api_key_env
         self.rows = {user_prompt(candidate_from_row(row)): row for row in rows}
@@ -642,7 +660,10 @@ def train(args: argparse.Namespace) -> None:
     exclude: set[str] = set()
     if args.exclude_ids_file:
         exclude = {line.strip() for line in Path(args.exclude_ids_file).read_text().splitlines() if line.strip()}
-    rows = load_rows(args.dataset, args.split, exclude, args.n_prompts, args.seed)
+    include = None
+    if args.include_ids_file:
+        include = {line.strip() for line in Path(args.include_ids_file).read_text().splitlines() if line.strip()}
+    rows = load_rows(args.dataset, args.split, exclude, args.n_prompts, args.seed, include)
     vllm_url = f"http://127.0.0.1:{args.vllm_port}"
     factory = partial(
         make_factory,
@@ -655,6 +676,7 @@ def train(args: argparse.Namespace) -> None:
         max_model_len=args.max_model_len,
         max_output_tokens=args.max_completion_length,
         scratch_dir=args.scratch_dir,
+        protocol_weight=args.protocol_weight,
     )
     dataset = Dataset.from_list(factory().prompt_rows())
     print(f"[train] {len(dataset)} papers, model {args.model}, output {args.output_dir}", flush=True)
@@ -722,6 +744,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset", default=DATASET_ID)
     parser.add_argument("--split", default="train")
     parser.add_argument("--exclude-ids-file", help="arXiv IDs never to train on (one per line)")
+    parser.add_argument("--include-ids-file", help="Only train on these arXiv IDs (one per line)")
+    parser.add_argument(
+        "--protocol-weight",
+        type=float,
+        default=0.0,
+        help="Fraction of correctness credit withheld when the research protocol was not followed",
+    )
     parser.add_argument("--n-prompts", type=int, default=None)
     parser.add_argument("--num-generations", type=int, default=8)
     parser.add_argument("--max-concurrent-rollouts", type=int, default=16)
