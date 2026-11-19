@@ -377,6 +377,12 @@ class OpenCodeCaptureSession:
         }
         workspace = self.workdir / "workspace"
         workspace.mkdir(parents=True, exist_ok=True)
+        # Many OpenCode servers cold-starting at once crash or stall (shared provider-package cache);
+        # start them one at a time. Startup takes ~1-2 s, the episode itself runs concurrently.
+        with self.factory.startup_lock:
+            return self._spawn_opencode(port, env, workspace)
+
+    def _spawn_opencode(self, port: int, env: dict[str, str], workspace: Path) -> str:
         self.process = subprocess.Popen(
             [self.factory.opencode_binary, "serve", "--hostname", "127.0.0.1", "--port", str(port)],
             cwd=workspace,
@@ -386,7 +392,7 @@ class OpenCodeCaptureSession:
             start_new_session=True,
         )
         url = f"http://127.0.0.1:{port}"
-        deadline = time.monotonic() + 60
+        deadline = time.monotonic() + 120
         while time.monotonic() < deadline:
             if self.process.poll() is not None:
                 raise RuntimeError(f"OpenCode exited during startup ({self.process.returncode})")
@@ -394,7 +400,7 @@ class OpenCodeCaptureSession:
                 if httpx.get(f"{url}/global/health", timeout=1).is_success:
                     return url
             time.sleep(0.2)
-        raise TimeoutError("OpenCode did not become healthy within 60 seconds")
+        raise TimeoutError("OpenCode did not become healthy within 120 seconds")
 
     async def _run(self, episode_timeout: float) -> bool:
         from opencode_ai import AsyncOpencode
@@ -487,17 +493,20 @@ class OpenCodeCaptureFactory:
         self._capture = None
         self._capture_url: str | None = None
         self._lock = threading.Lock()
+        self.startup_lock = threading.Lock()
 
     def __getstate__(self) -> dict[str, Any]:
         state = dict(self.__dict__)
         state["_capture"] = None
         state["_capture_url"] = None
         state["_lock"] = None
+        state["startup_lock"] = None
         return state
 
     def __setstate__(self, state: dict[str, Any]) -> None:
         self.__dict__.update(state)
         self._lock = threading.Lock()
+        self.startup_lock = threading.Lock()
 
     def _ensure_capture(self) -> None:
         with self._lock:
