@@ -7,6 +7,8 @@
 #   "safetensors>=0.5.0",
 #   "torch>=2.7.0",
 #   "transformers==5.14.1",
+#   "torchvision",
+#   "pillow",
 # ]
 # ///
 """Merge the URL-agent LoRA into Qwen3.5 and publish a standalone HF model."""
