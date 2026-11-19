@@ -417,6 +417,15 @@ not that it beats it. Records and summaries:
 [`nielsr/qwen35-4b-url-agent-eval-v2`](https://huggingface.co/datasets/nielsr/qwen35-4b-url-agent-eval-v2)
 (`sft-v2/`, `sft1-grpo/`). The teacher costs about $0.03 per paper through Inference Providers.
 
+### Demo Space: student vs. teacher, side by side
+
+[`nielsr/url-agent-race`](https://huggingface.co/spaces/nielsr/url-agent-race) (private, source in
+`space/`) races the fine-tuned student (Inference Endpoint, now 1x A10G) against GLM-5.2 on any arXiv
+paper. Both run in real OpenCode with the evaluation prompt, tools and schema, and each column streams
+reasoning and tool calls with time, tokens and cost. The agents never see a credential: a local proxy
+attaches `HF_TOKEN` and the bill-to header. The Space needs an `HF_TOKEN` secret (scoped to Inference
+Providers billing and endpoint inference) before it can run.
+
 ### SFT v2: more teacher traces
 
 `generate_opencode_traces.py --accept-partial` also distills papers where only some requested
