@@ -53,6 +53,7 @@ import os
 import random
 import re
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -267,12 +268,16 @@ class OpenCodeCaptureSession:
         return VerifyResult(env_reward=correctness(self.row, self.findings), done=True)
 
     def close(self) -> None:
-        if self.process is not None and self.process.poll() is None:
-            self.process.terminate()
+        if self.process is not None:
+            # OpenCode spawns workers (LSP, shell tools); kill its whole process group, not just the parent.
+            with suppress(ProcessLookupError, PermissionError):
+                os.killpg(self.process.pid, signal.SIGTERM)
             try:
                 self.process.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                self.process.kill()
+                with suppress(ProcessLookupError, PermissionError):
+                    os.killpg(self.process.pid, signal.SIGKILL)
+                self.process.wait(timeout=5)
         if self.capture_id is not None:
             with suppress(Exception):
                 self.factory.capture.registry.delete(self.capture_id)
