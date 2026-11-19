@@ -393,6 +393,78 @@ per-turn token limit. A real local OpenCode smoke test on held-out paper
 `2604.11004` completed in 29 seconds, used Bash plus structured output, and
 matched both expected URLs.
 
+## November 2026 update: teacher parity, and SFT -> RL with the new OpenEnv/TRL stack
+
+All numbers in this section were measured on the same day in the same OpenCode harness
+(180 s episode budget, 15 tool calls, 64k context), on the fully scoreable papers of the
+held-out splits. The base model scores much higher than in August (test field accuracy
+56.0% -> 78.6%): current HF paper metadata links far more repositories, so the August
+numbers above are not comparable with these.
+
+| Model | Test field acc. (84 fields) | Test exact (42) | Test tool calls | Val field acc. (100 fields) | Val exact (50) | Val tool calls |
+|---|---:|---:|---:|---:|---:|---:|
+| Qwen3.5-4B base | 78.6% | 26 | 8.4 | 71.0% | 30 | 6.5 |
+| SFT v1 (102 traces, merged) | 83.3% | 29 | 3.2 | 88.0% | 40 | 2.6 |
+| SFT v1 + GRPO (100 steps) | 83.3% | 29 | 2.3 | 90.0% | 40 | 2.2 |
+| **SFT v2 (873 traces)** | **85.7%** | **32** | 4.7 | **90.0%** | **40** | 3.7 |
+| GLM-5.2 teacher | 83.3% | 32 | 4.7 | - | - | - |
+
+With 42-50 papers per split, differences of a few points are within noise. The supported
+conclusion is that the 4B student now matches the frontier teacher on this benchmark; it is
+not that it beats it. Records and summaries:
+[`nielsr/qwen35-4b-url-agent-eval-v2`](https://huggingface.co/datasets/nielsr/qwen35-4b-url-agent-eval-v2)
+(`sft-v2/`, `sft1-grpo/`). The teacher costs about $0.03 per paper through Inference Providers.
+
+### SFT v2: more teacher traces
+
+`generate_opencode_traces.py --accept-partial` also distills papers where only some requested
+fields carry verified labels (1,732 instead of 346 train papers). One GLM-5.2 attempt per paper
+gave 873 accepted trajectories (previously 102), published as `train-v2.jsonl` in
+`nielsr/paper-url-opencode-traces`. SFT v2 trains `Qwen/Qwen3.5-4B` in bf16 for one epoch with a
+32k max length on one H200 (~55 min), producing
+[`nielsr/qwen35-4b-url-agent-lora-v2`](https://huggingface.co/nielsr/qwen35-4b-url-agent-lora-v2).
+`train_sft.py --full-trajectory` supervises every assistant turn of a trajectory in one example,
+which trains on identical text with roughly half the forwarded tokens.
+
+### GRPO with TRL `HarnessAsyncGRPOTrainer` + OpenEnv capture
+
+`train_grpo_harness.py` replaces the old one-step smoke script:
+
+- OpenCode runs unmodified (one `opencode serve` per rollout, own workspace and database) and reaches
+  the policy only through OpenEnv's capture proxy, with the capture session id as its API key.
+- TRL 1.18.1's `HarnessAsyncGRPOTrainer` trains on the proxy's validated `TrainingTrace`
+  (engine token ids, logprobs, loss masks; nothing is re-tokenized).
+- The policy is a LoRA (r=32) on the merged SFT checkpoint. Each new adapter version is loaded into
+  vLLM by name, which sidesteps the Qwen3.5 full-weight reload problem described below.
+- Reward: fraction of verified URL fields correct, plus `0.1 * (1 - tool_calls / 15)` when all are
+  correct. A rule-based guard (in the spirit of safeagents) scores 0 for any authored tool input
+  that looks up the label dataset or touches `HF_TOKEN`.
+- OpenCode's structured-output mode forces `tool_choice: "required"`, which OpenEnv refuses to
+  train on (constrained logits). A small ASGI middleware rewrites it to `"auto"`; a turn that
+  answers in prose fails OpenCode's structured-output check and earns no reward.
+- vLLM 0.33 runs from its own `uvx` environment because it and OpenEnv 0.14 pin incompatible `mcp`
+  majors. Use H200s: TRL selects FlashAttention-4 on RTX PRO 6000 (sm_120), which fails there.
+
+```bash
+hf jobs run --namespace huggingface --flavor h200x2 --timeout 4h --secrets HF_TOKEN \
+  --volume hf://buckets/nielsr/jobs-artifacts:/artifacts --detach huggingface/trl -- \
+  bash -c "pip install -q uv && cp -r /artifacts/url-grpo/code/REV /work && cd /work && \
+    uv run train_grpo_harness.py --launch --num-generations 8 --max-concurrent-rollouts 32 \
+      --max-steps 100 --gradient-accumulation-steps 2 --report-to none \
+      --hub-model-id nielsr/qwen35-4b-url-agent-grpo-lora"
+```
+
+The 100-step run from SFT v1 took 58 minutes on 2x H200 (importance ratio ~0.9997). It kept
+accuracy and cut tool calls by 29% on test and 17% on validation, mirroring the harness-adapter
+results. Two caveats:
+
+- Training reward barely moved. Most training papers are solved by all eight rollouts, so the
+  efficiency bonus carried most of the signal. A follow-up run should sample papers the policy
+  solves only sometimes.
+- The policy learned to skip parts of the research protocol: full-protocol episodes fell from 36/42
+  to 25/42 on test, mostly by not opening the paper. URL accuracy did not suffer, but if that
+  protocol matters it has to be part of the reward.
+
 ## Harness-level GRPO (optional third stage)
 
 This repository adapts TRL's harness-training example to
