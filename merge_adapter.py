@@ -96,7 +96,9 @@ def merge(args: argparse.Namespace) -> Path:
     if not token:
         raise RuntimeError("HF_TOKEN must be passed as a Job secret")
 
-    adapter_snapshot = Path(snapshot_download(args.adapter, token=token))
+    adapter_snapshot = (
+        Path(args.adapter) if Path(args.adapter).is_dir() else Path(snapshot_download(args.adapter, token=token))
+    )
     verify_adapter_base(adapter_snapshot, args.base_model)
     audit = audit_visual_lora(adapter_snapshot)
     print(f"Adapter audit: {json.dumps(audit, sort_keys=True)}", flush=True)
