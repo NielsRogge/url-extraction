@@ -688,8 +688,11 @@ def prepare_text_adapter(source: str, destination: Path) -> str:
     tensors = load_file(source_path / "adapter_model.safetensors", device="cpu")
     text_tensors = {name: tensor for name, tensor in tensors.items() if ".visual." not in name}
     removed = set(tensors) - set(text_tensors)
-    if not removed or not text_tensors:
-        raise RuntimeError("Expected both visual and text LoRA tensors in the trained adapter")
+    if not text_tensors:
+        raise RuntimeError("Expected text LoRA tensors in the trained adapter")
+    if not removed:
+        # Adapters trained on the language model only (e.g. the GRPO stage) need no filtering.
+        print(f"Adapter has {len(text_tensors)} text-only tensors; no visual tensors to remove", flush=True)
     nonzero_visual_b = [name for name in removed if ".lora_B." in name and bool(tensors[name].count_nonzero().item())]
     if nonzero_visual_b:
         raise RuntimeError("Refusing to remove trained visual LoRA tensors")
