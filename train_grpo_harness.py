@@ -10,6 +10,8 @@
 #   "flash-linear-attention==0.6.0",
 #   "datasets>=4.0.0",
 #   "trackio",
+#   "aiohttp>=3.13.3",
+#   "requests",
 #   "httpx>=0.27.0",
 #   "huggingface-hub>=1.13.0",
 #   "opencode-ai==0.1.0a36",
