@@ -237,7 +237,12 @@ class AgentRun:
         return (self.finished or time.monotonic()) - self.started
 
     def parts(self) -> list[dict[str, Any]]:
-        return [part for message in self.messages for part in message.get("parts", [])]
+        return [
+            part
+            for message in self.messages
+            if (message.get("info") or {}).get("role") == "assistant"
+            for part in message.get("parts", [])
+        ]
 
     def tool_parts(self) -> list[dict[str, Any]]:
         return [part for part in self.parts() if part.get("type") == "tool"]
