@@ -880,6 +880,9 @@ def summarize(records: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def publish(args: argparse.Namespace, output_path: Path, summary_path: Path) -> None:
+    if not args.output_repo:
+        print(f"Results kept at {output_path} and {summary_path}; no output repo", flush=True)
+        return
     api = HfApi(token=os.environ.get("HF_TOKEN"))
     api.create_repo(args.output_repo, repo_type="dataset", private=True, exist_ok=True)
     api.upload_file(
@@ -927,7 +930,9 @@ def main(args: argparse.Namespace) -> None:
     args.opencode_binary = install_opencode(workdir / "bin" / "opencode")
     os.environ["PATH"] = str(args.opencode_binary.parent) + os.pathsep + os.environ["PATH"]
     configure_opencode(args)
-    adapter_snapshot = snapshot_download(args.adapter, token=os.environ["HF_TOKEN"])
+    adapter_snapshot = (
+        args.adapter if Path(args.adapter).is_dir() else snapshot_download(args.adapter, token=os.environ["HF_TOKEN"])
+    )
     adapter_path = prepare_text_adapter(adapter_snapshot, workdir / "text-adapter")
     server = start_vllm(args, adapter_path)
     try:

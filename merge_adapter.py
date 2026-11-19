@@ -121,6 +121,9 @@ def merge(args: argparse.Namespace) -> Path:
     AutoProcessor.from_pretrained(args.base_model).save_pretrained(output)
     (output / "README.md").write_text(model_card(args.base_model, args.adapter))
 
+    if not args.hub_model_id:
+        print(f"Saved merged checkpoint to {output}; skipping Hub upload", flush=True)
+        return output
     api = HfApi(token=token)
     api.create_repo(args.hub_model_id, repo_type="model", private=args.private, exist_ok=True)
     api.upload_folder(
