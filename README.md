@@ -407,6 +407,8 @@ numbers above are not comparable with these.
 | SFT v1 (102 traces, merged) | 83.3% | 29 | 3.2 | 88.0% | 40 | 2.6 |
 | SFT v1 + GRPO (100 steps) | 83.3% | 29 | 2.3 | 90.0% | 40 | 2.2 |
 | **SFT v2 (873 traces)** | **85.7%** | **32** | 4.7 | **90.0%** | **40** | 3.7 |
+| SFT v2, merged (paired control for the row below) | 84.5% | 32 | 5.3 | 90.0% | 40 | 3.9 |
+| **SFT v2 + GRPO v2** (harder prompts, protocol-aware reward) | 84.5% | 30 | **3.7** | **93.0%** | **43** | **3.5** |
 | GLM-5.2 teacher | 83.3% | 32 | 4.7 | - | - | - |
 
 With 42-50 papers per split, differences of a few points are within noise. The supported
@@ -464,6 +466,28 @@ results. Two caveats:
 - The policy learned to skip parts of the research protocol: full-protocol episodes fell from 36/42
   to 25/42 on test, mostly by not opening the paper. URL accuracy did not suffer, but if that
   protocol matters it has to be part of the reward.
+
+### GRPO v2: from SFT v2, harder prompts, protocol in the reward
+
+The second GRPO run starts from the merged SFT v2 checkpoint and fixes both caveats of the first:
+
+- Prompts (`--include-ids-file`) are the 1,123 train papers where the teacher got a URL wrong,
+  skipped part of the research protocol, or that have a verified project page. The 599 GitHub-only
+  papers the teacher solved cleanly (and SFT v2 trained on) are excluded.
+- `--protocol-weight 0.5` halves the credit for correct URLs found without the research protocol
+  (`derive_attempt_complete`, the evaluator's own check), and the efficiency bonus requires it.
+
+Training reward rose from 0.59 (steps 0-20) to 0.94-1.0 (steps 60-100), with within-group reward
+std of 0.42 at the start. The run took 43 minutes on 2x H200. Against its own merged SFT v2
+starting point, GRPO v2 cut tool calls by 29% on test and 10% on validation, raised validation
+field accuracy from 90% to 93% (exact 40 -> 43 of 50), kept test field accuracy at 84.5%
+(exact 32 -> 30 of 42), and increased full-protocol episodes (test 32 -> 38, validation 44 -> 45).
+Unlike GRPO v1, it became more efficient without dropping research steps. These gaps are within
+the noise of 42-50 paper splits.
+
+Because the account's private Hub and bucket storage was full, merge, GRPO and evaluation ran in
+one job on local disk (`--hub-model-id ''`, `--output-repo ''`), and the summaries were read from
+the job log. The GRPO v2 adapter was therefore not persisted; rerunning requires free storage.
 
 ## Harness-level GRPO (optional third stage)
 
