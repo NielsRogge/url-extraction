@@ -60,8 +60,8 @@ for _key in [k for k in os.environ if "TOKEN" in k.upper() or "SECRET" in k.uppe
     os.environ.pop(_key, None)
 BILL_TO = os.environ.get("HF_BILL_TO", "").strip() or None
 STUDENT_URL = os.environ.get("STUDENT_ENDPOINT_URL", "").rstrip("/")
-STUDENT_LABEL = os.environ.get("STUDENT_LABEL", "Qwen3.5-4B URL agent (SFT, 1× L4)")
-STUDENT_GPU_PER_HOUR = float(os.environ.get("STUDENT_GPU_PER_HOUR", "0.80"))
+STUDENT_LABEL = os.environ.get("STUDENT_LABEL", "Qwen3.5-4B URL agent (SFT, 1× A10G)")
+STUDENT_GPU_PER_HOUR = float(os.environ.get("STUDENT_GPU_PER_HOUR", "1.00"))
 TEACHER_MODEL = os.environ.get("TEACHER_MODEL", "zai-org/GLM-5.2")
 TEACHER_ROUTER = "https://router.huggingface.co/v1"
 LABEL_DATASET = os.environ.get("LABEL_DATASET", "nielsr/paper-url-extraction-v1")
@@ -597,8 +597,7 @@ with gr.Blocks(title="Small agent vs. frontier teacher", css=CSS, theme=gr.theme
         right = gr.HTML(render_column(None, None, None))
     gr.Markdown(
         f"Each agent may use at most {MAX_TOOL_CALLS} tool calls and {EPISODE_TIMEOUT:g} s. Teacher cost uses router "
-        "prices from models.dev; student cost is the L4 endpoint's GPU time for this request. "
-        "Code: [paper-url agent pipeline](https://huggingface.co/datasets/nielsr/qwen35-4b-url-agent-eval-v2)."
+        "prices from models.dev; student cost is the A10G endpoint's GPU time for this request."
     )
     button.click(race, paper, [paper_info, left, right], concurrency_limit=2)
     paper.submit(race, paper, [paper_info, left, right], concurrency_limit=2)

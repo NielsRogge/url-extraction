@@ -18,7 +18,7 @@ both inside the unmodified [OpenCode](https://opencode.ai) harness with the same
 and JSON output schema:
 
 - **Student**: Qwen3.5-4B fine-tuned on the teacher's verified OpenCode trajectories (and optionally
-  refined with GRPO through OpenEnv's capture proxy and TRL), served from a single-L4 Inference Endpoint.
+  refined with GRPO through OpenEnv's capture proxy and TRL), served from a single-A10G Inference Endpoint.
 - **Teacher**: GLM-5.2 through Hugging Face Inference Providers.
 
 Each column streams that agent's reasoning and tool calls (click a call to see its output), with
