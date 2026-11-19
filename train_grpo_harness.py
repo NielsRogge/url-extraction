@@ -181,6 +181,51 @@ def free_port() -> int:
         return int(sock.getsockname()[1])
 
 
+class UnconstrainedToolChoice:
+    """ASGI middleware: rewrite `tool_choice: "required"` to `"auto"` before the capture proxy sees it.
+
+    OpenCode forces a tool call on every turn when it requests structured output. A forced choice masks
+    logits, so the engine's logprobs would not be the policy's and OpenEnv rightly refuses to train on
+    them. Letting the policy choose keeps sampling unconstrained; a turn that answers in prose instead
+    of calling `StructuredOutput` fails OpenCode's structured-output check and earns no reward.
+    """
+
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http" or scope.get("method") != "POST" or not scope.get("path", "").endswith(
+            "/chat/completions"
+        ):
+            await self.app(scope, receive, send)
+            return
+        chunks = []
+        more = True
+        while more:
+            message = await receive()
+            chunks.append(message.get("body", b""))
+            more = message.get("more_body", False)
+        body = b"".join(chunks)
+        with suppress(ValueError, TypeError):
+            payload = json.loads(body)
+            if isinstance(payload, dict) and payload.get("tool_choice") not in (None, "auto", "none"):
+                payload["tool_choice"] = "auto"
+                body = json.dumps(payload).encode()
+        headers = [(k, v) for k, v in scope.get("headers", []) if k.lower() != b"content-length"]
+        headers.append((b"content-length", str(len(body)).encode()))
+        scope = {**scope, "headers": headers}
+        sent = False
+
+        async def replay():
+            nonlocal sent
+            if not sent:
+                sent = True
+                return {"type": "http.request", "body": body, "more_body": False}
+            return await receive()
+
+        await self.app(scope, replay, send)
+
+
 class OpenCodeCaptureSession:
     """A loop-owning OpenEnv session (`TrainableSession`): OpenCode drives, the proxy records."""
 
@@ -470,6 +515,7 @@ class OpenCodeCaptureFactory:
             max_output_tokens=self.max_output_tokens,
             max_model_calls=self.max_model_calls,
         )
+        capture.app.add_middleware(UnconstrainedToolChoice)
         capture.start()
         self._capture = capture
         self._capture_url = f"http://127.0.0.1:{port}"
