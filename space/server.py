@@ -118,12 +118,14 @@ def run_snapshot(run: AgentRun, reference: dict[str, Any]) -> dict[str, Any]:
         if kind != "tool":
             continue
         verb, arg, _ = classify(part)
-        status = (part.get("state") or {}).get("status", "running")
+        state = part.get("state") or {}
+        status = state.get("status", "running")
         if part.get("tool") == "StructuredOutput" and (
             part is not last_tool or (run.status == "done" and run.findings is None)
         ):
             status = "rejected"
-        rows.append({"verb": verb, "arg": arg, "status": status})
+        output = str(state.get("output") or state.get("error") or "")
+        rows.append({"verb": verb, "arg": arg, "status": status, "out": output[:300], "out_len": len(output)})
     answer = None
     correct = scored = 0
     if run.findings is not None:

@@ -168,7 +168,8 @@ function renderRows(side, run) {
     const live = run.status === "running" && i === run.rows.length - 1 && r.status !== "completed";
     const cls = ["row", r.verb === "think" ? "think" : "", r.status === "rejected" ? "rejected" : "", r.status === "error" ? "error" : "", live ? "live" : ""].join(" ");
     const vcls = r.verb === "answer" ? "answer" : QUIET.has(r.verb) ? "quiet" : "";
-    return `<div class="${cls}"><span class="verb ${vcls}">${esc(r.verb)}</span><span class="arg" title="${esc(r.arg)}">${esc(r.arg)}</span></div>`;
+    const tip = r.out ? `${r.arg}\n\n→ ${r.out}${r.out_len > r.out.length ? " …" : ""}` : r.arg;
+    return `<div class="${cls}"><span class="verb ${vcls}">${esc(r.verb)}</span><span class="arg" title="${esc(tip)}">${esc(r.arg)}</span></div>`;
   }).join("");
   if (box.dataset.n !== String(run.rows.length) || box.dataset.s !== run.status) {
     box.innerHTML = html;
