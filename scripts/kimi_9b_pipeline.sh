@@ -2,7 +2,7 @@
 # Kimi-K3.1-Pro teacher -> Qwen3.5-9B student: SFT + eval, then GRPO + eval, on HF Jobs.
 #
 # Needs an HF_TOKEN that can start Jobs in the `huggingface` namespace and write nielsr repos/buckets.
-# The merged Kimi traces must already be at hf://buckets/nielsr/jobs-artifacts/url-grpo/data/train-kimi-k31.jsonl.
+# The merged Kimi traces must already be at hf://buckets/nielsr/url-agent-kimi/data/train-kimi-k31.jsonl.
 #
 #   scripts/kimi_9b_pipeline.sh sft    # 1x H200: SFT (full-trajectory, bf16, 32k) + eval base vs SFT on test/validation
 #   scripts/kimi_9b_pipeline.sh grpo   # 2x H200: merge SFT, GRPO, merge GRPO, eval GRPO vs merged SFT
@@ -10,7 +10,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 NS=huggingface
-BUCKET=nielsr/jobs-artifacts
+BUCKET=nielsr/url-agent-kimi  # public bucket: the account's private storage is full
 BASE=Qwen/Qwen3.5-9B
 SFT_ADAPTER=nielsr/qwen35-9b-url-agent-lora-kimi
 GRPO_ADAPTER=nielsr/qwen35-9b-url-agent-grpo-lora-kimi
@@ -22,7 +22,7 @@ EVAL_FLAGS="--limit 50 --concurrency 8 --episode-timeout 180 --max-tool-calls 15
 stage_code() {
   REV=kimi9b-$(date +%Y%m%d-%H%M)
   for f in train_sft.py train_grpo_harness.py evaluate_vllm.py merge_adapter.py "$IDS"; do
-    hf buckets cp "$f" "hf://buckets/$BUCKET/url-grpo/code/$REV/$(basename "$f")" >/dev/null
+    hf buckets cp "$f" "hf://buckets/$BUCKET/code/$REV/$(basename "$f")" >/dev/null
   done
   echo "$REV"
 }
@@ -30,8 +30,8 @@ stage_code() {
 case "${1:-}" in
 sft)
   REV=$(stage_code)
-  CMD="set -e; pip install -q uv; cp -r /artifacts/url-grpo/code/$REV /work; cd /work
-uv run train_sft.py --traces /artifacts/url-grpo/data/train-kimi-k31.jsonl --model $BASE --no-4bit --max-length 32768 --epochs 1 --full-trajectory --save-steps 50 --output /sft --hub-model-id $SFT_ADAPTER
+  CMD="set -e; pip install -q uv; cp -r /artifacts/code/$REV /work; cd /work
+uv run train_sft.py --traces /artifacts/data/train-kimi-k31.jsonl --model $BASE --no-4bit --max-length 32768 --epochs 1 --full-trajectory --save-steps 50 --output /sft --hub-model-id $SFT_ADAPTER
 for s in test validation; do uv run evaluate_vllm.py --split \$s $EVAL_FLAGS --base-model $BASE --adapter /sft --output /eval/\$s.jsonl --output-repo $EVAL_REPO --tag sft/; done
 echo ALL_DONE"
   hf jobs run --namespace "$NS" --name url-kimi-9b-sft --flavor h200 --timeout 8h --secrets HF_TOKEN \
@@ -40,7 +40,7 @@ echo ALL_DONE"
 grpo)
   REV=$(stage_code)
   IDS_NAME=$(basename "$IDS")
-  CMD="set -e; pip install -q uv; cp -r /artifacts/url-grpo/code/$REV /work; cd /work
+  CMD="set -e; pip install -q uv; cp -r /artifacts/code/$REV /work; cd /work
 uv run --with torchvision --with pillow merge_adapter.py --base-model $BASE --adapter $SFT_ADAPTER --hub-model-id '' --output /model
 uv run train_grpo_harness.py --launch --model /model --include-ids-file $IDS_NAME --protocol-weight 0.5 --num-generations 8 --max-concurrent-rollouts \${ROLLOUTS:-32} --max-steps 100 --save-steps 50 --gradient-accumulation-steps 2 --report-to none --output-dir /grpo-run --hub-model-id $GRPO_ADAPTER
 uv run --with torchvision --with pillow merge_adapter.py --base-model /model --adapter /grpo-run --hub-model-id $GRPO_MERGED --output /grpo-merged
