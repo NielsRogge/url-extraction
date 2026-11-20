@@ -70,6 +70,7 @@ def verify_adapter_base(snapshot: Path, requested_base: str) -> None:
 
 
 def model_card(base_model: str, adapter: str) -> str:
+    title = base_model.split("/")[-1] if "/" in base_model else "Qwen3.5"
     return f"""---
 base_model: {base_model}
 library_name: transformers
@@ -80,10 +81,10 @@ tags:
 - merged
 ---
 
-# Qwen3.5 4B URL extraction agent
+# {title} URL extraction agent
 
 Standalone merged checkpoint of [{adapter}](https://huggingface.co/{adapter}),
-fine-tuned by supervised learning on verified OpenCode URL-extraction traces.
+fine-tuned on verified OpenCode URL-extraction traces.
 
 The model is intended to run inside the OpenCode harness with Bash, Read,
 Grep, Glob, WebFetch, and structured-output tools. See the source repository
@@ -121,7 +122,11 @@ def merge(args: argparse.Namespace) -> Path:
     # the standalone merged repository can boot without reaching back to the
     # base model repository.
     AutoProcessor.from_pretrained(args.base_model).save_pretrained(output)
-    (output / "README.md").write_text(model_card(args.base_model, args.adapter))
+    # The Hub rejects a local path as `base_model`; --card-base-model names the Hub model instead.
+    card_base = args.card_base_model or args.base_model
+    if args.hub_model_id and Path(card_base).exists():
+        raise ValueError(f"--card-base-model must be a Hub model id when --base-model is a local path ({card_base})")
+    (output / "README.md").write_text(model_card(card_base, args.adapter))
 
     if not args.hub_model_id:
         print(f"Saved merged checkpoint to {output}; skipping Hub upload", flush=True)
@@ -146,6 +151,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hub-model-id", default=OUTPUT_REPO)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--max-shard-size", default="4GB")
+    parser.add_argument("--card-base-model", help="Hub model id for the model card when --base-model is a local path")
     parser.add_argument("--public", dest="private", action="store_false")
     parser.set_defaults(private=True)
     return parser.parse_args()

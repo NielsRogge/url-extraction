@@ -6,6 +6,7 @@
 #
 #   scripts/kimi_9b_pipeline.sh sft    # 1x H200: SFT (full-trajectory, bf16, 32k) + eval base vs SFT on test/validation
 #   scripts/kimi_9b_pipeline.sh grpo   # 2x H200: merge SFT, GRPO, merge GRPO, eval GRPO vs merged SFT
+#   scripts/kimi_9b_pipeline.sh grpo-finish  # 1x H200: redo merge + eval from the pushed GRPO adapter
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -43,11 +44,22 @@ grpo)
   CMD="set -e; pip install -q uv; cp -r /artifacts/code/$REV /work; cd /work
 uv run --with torchvision --with pillow merge_adapter.py --base-model $BASE --adapter $SFT_ADAPTER --hub-model-id '' --output /model
 uv run train_grpo_harness.py --launch --model /model --include-ids-file $IDS_NAME --protocol-weight 0.5 --num-generations 8 --max-concurrent-rollouts \${ROLLOUTS:-32} --max-steps 100 --save-steps 50 --gradient-accumulation-steps 2 --report-to none --output-dir /grpo-run --hub-model-id $GRPO_ADAPTER
-uv run --with torchvision --with pillow merge_adapter.py --base-model /model --adapter /grpo-run --hub-model-id $GRPO_MERGED --output /grpo-merged
+uv run --with torchvision --with pillow merge_adapter.py --base-model /model --adapter /grpo-run --card-base-model $BASE --hub-model-id $GRPO_MERGED --output /grpo-merged
 for s in test validation; do uv run evaluate_vllm.py --split \$s $EVAL_FLAGS --base-model /model --adapter /grpo-run --output /eval/\$s.jsonl --output-repo $EVAL_REPO --tag sft-grpo/; done
 echo ALL_DONE"
   hf jobs run --namespace "$NS" --name url-kimi-9b-grpo --flavor h200x2 --timeout 8h --secrets HF_TOKEN \
     -e ROLLOUTS="${ROLLOUTS:-32}" --volume "hf://buckets/$BUCKET:/artifacts" --detach huggingface/trl -- bash -c "$CMD"
   ;;
-*) echo "usage: $0 sft|grpo" >&2; exit 2 ;;
+grpo-finish)
+  # Recovery path when GRPO trained and pushed $GRPO_ADAPTER but a later step failed: no retraining.
+  REV=$(stage_code)
+  CMD="set -e; pip install -q uv; cp -r /artifacts/code/$REV /work; cd /work
+uv run --with torchvision --with pillow merge_adapter.py --base-model $BASE --adapter $SFT_ADAPTER --hub-model-id '' --output /model
+uv run --with torchvision --with pillow merge_adapter.py --base-model /model --adapter $GRPO_ADAPTER --card-base-model $BASE --hub-model-id $GRPO_MERGED --output /grpo-merged
+for s in test validation; do uv run evaluate_vllm.py --split \$s $EVAL_FLAGS --base-model /model --adapter $GRPO_ADAPTER --output /eval/\$s.jsonl --output-repo $EVAL_REPO --tag sft-grpo/; done
+echo ALL_DONE"
+  hf jobs run --namespace "$NS" --name url-kimi-9b-grpo-finish --flavor h200 --timeout 4h --secrets HF_TOKEN \
+    --volume "hf://buckets/$BUCKET:/artifacts" --detach huggingface/trl -- bash -c "$CMD"
+  ;;
+*) echo "usage: $0 sft|grpo|grpo-finish" >&2; exit 2 ;;
 esac
