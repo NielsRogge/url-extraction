@@ -398,127 +398,340 @@ async def run_agent(client: AsyncOpencode, run: AgentRun, candidate: PaperCandid
 # Rendering
 # --------------------------------------------------------------------------------------------------
 
-TOOL_ICONS = {"bash": "⌨️", "webfetch": "🌐", "read": "📄", "grep": "🔎", "glob": "🗂️", "StructuredOutput": "✅"}
+SIDES = {
+    "student": {"role": "Student", "detail": "Fine-tuned on the teacher's traces · single-GPU endpoint"},
+    "teacher": {"role": "Teacher", "detail": "Frontier model · Hugging Face Inference Providers"},
+}
 
 
 def esc(value: Any, limit: int | None = None) -> str:
     text = str(value if value is not None else "")
     if limit and len(text) > limit:
-        text = text[:limit] + f"\n… ({len(text) - limit:,} more characters)"
+        text = text[:limit].rstrip() + f" … (+{len(text) - limit:,} characters)"
     return html.escape(text)
 
 
-def tool_title(part: dict[str, Any]) -> str:
+def step_label(part: dict[str, Any]) -> tuple[str, str]:
+    """(plain-language label, the exact command/target) for one tool call."""
     state = part.get("state") or {}
     data = state.get("input") or {}
     name = part.get("tool", "")
     if name == "bash":
-        return data.get("command") or ""
+        command = str(data.get("command") or "")
+        if "hf papers info" in command:
+            return "Looked up the paper's Hub metadata", command
+        if "hf papers read" in command:
+            return "Read the paper", command
+        if "api.github.com" in command or "github.com" in command:
+            return "Checked GitHub", command
+        if "curl" in command or "wget" in command:
+            return "Downloaded a web page", command
+        return "Ran a shell command", command
     if name == "webfetch":
-        return data.get("url") or ""
+        return "Opened a web page", str(data.get("url") or "")
     if name == "StructuredOutput":
-        return "final answer"
-    return json.dumps(data)[:200]
+        return "Submitted the final answer", ""
+    if name == "grep":
+        return "Searched text", str(data.get("pattern") or "")
+    if name == "read":
+        return "Read a file", str(data.get("filePath") or data.get("path") or "")
+    if name == "glob":
+        return "Listed files", str(data.get("pattern") or "")
+    return f"Used {name}", json.dumps(data)[:200]
 
 
-def render_part(part: dict[str, Any], index: int) -> str:
-    if part.get("type") == "reasoning" and (part.get("text") or "").strip():
-        return f'<div class="thought">💭 {esc(part["text"].strip(), 400)}</div>'
-    if part.get("type") == "text" and (part.get("text") or "").strip():
-        return f'<div class="thought">💬 {esc(part["text"].strip(), 400)}</div>'
-    if part.get("type") != "tool":
+def render_step(part: dict[str, Any], index: int, rejected: bool = False) -> str:
+    kind = part.get("type")
+    text = (part.get("text") or "").strip()
+    if kind in {"reasoning", "text"} and text:
+        if len(text) <= 220:
+            return f'<div class="thought"><span class="thought-tag">Thinking</span>{esc(text)}</div>'
+        return (
+            f'<details class="thought"><summary><span class="thought-tag">Thinking</span>{esc(text[:200])}…'
+            f'<span class="more">more</span></summary><div class="thought-full">{esc(text, 4000)}</div></details>'
+        )
+    if kind != "tool":
         return ""
     state = part.get("state") or {}
     status = state.get("status", "pending")
     timing = state.get("time") or {}
-    duration = ""
-    if timing.get("start") and timing.get("end"):
-        duration = f"{(timing['end'] - timing['start']) / 1000:.1f}s"
-    badge = {"completed": "ok", "error": "err", "running": "run", "pending": "run"}.get(status, "run")
-    mark = {"ok": "✓", "err": "✗", "run": "…"}[badge]
-    name = part.get("tool", "")
-    if name == "StructuredOutput":
-        body = esc(json.dumps(state.get("input") or {}, indent=2), 1500)
+    duration = f"{(timing['end'] - timing['start']) / 1000:.1f} s" if timing.get("start") and timing.get("end") else ""
+    if status == "completed":
+        badge = '<span class="badge ok">✓ Done</span>'
+    elif status == "error":
+        badge = '<span class="badge err">✗ Failed</span>'
     else:
-        body = esc(state.get("output") or state.get("error") or "", 1500)
+        badge = '<span class="badge run">Running…</span>'
+    label, target = step_label(part)
+    name = part.get("tool", "")
+    if rejected:
+        label = "Final answer rejected, retried"
+        badge = '<span class="badge err">✗ Not accepted</span>'
+    if name == "StructuredOutput":
+        output = json.dumps(state.get("input") or {}, indent=2)
+    else:
+        output = str(state.get("output") or state.get("error") or "")
+    target_html = f'<code class="target">{esc(target, 400)}</code>' if target else ""
+    output_html = (
+        f'<details class="output"><summary>Show output</summary><pre>{esc(output, 3000)}</pre></details>'
+        if output.strip()
+        else ""
+    )
     return (
-        f'<details class="call {badge}"><summary><span class="idx">{index}</span>'
-        f'<span class="icon">{TOOL_ICONS.get(name, "🔧")}</span><span class="tool">{esc(name)}</span>'
-        f'<code>{esc(tool_title(part), 160)}</code><span class="dur">{duration}</span>'
-        f'<span class="mark">{mark}</span></summary><pre>{body}</pre></details>'
+        f'<div class="step {status}"><div class="num">{index}</div><div class="step-body">'
+        f'<div class="step-head"><span class="step-label">{esc(label)}</span>'
+        f'<span class="step-meta">{duration}{badge}</span></div>{target_html}{output_html}</div></div>'
     )
 
 
-def verdict(predicted: str | None, expected: str | None) -> str:
+def field_check(predicted: str | None, expected: str | None) -> tuple[str, bool | None]:
     if expected == "unknown":
-        return '<span class="na">no verified label</span>'
-    good = canonical_url(predicted) == canonical_url(expected)
-    return '<span class="good">✓ matches</span>' if good else f'<span class="bad">✗ expected {esc(expected or "none")}</span>'
+        return '<span class="pill na">— No verified label</span>', None
+    if canonical_url(predicted) == canonical_url(expected):
+        return '<span class="pill ok">✓ Correct</span>', True
+    shown = esc(expected) if expected else "none"
+    return f'<span class="pill err">✗ Wrong</span><div class="expected">Expected: {shown}</div>', False
+
+
+def run_score(run: AgentRun, reference: dict[str, Any] | None) -> tuple[int, int]:
+    """(correct, scored) over the two URL fields."""
+    if run.findings is None or reference is None:
+        return 0, sum(1 for v in (reference or {}).values() if v != "unknown")
+    correct = scored = 0
+    for name in ("github", "project_page"):
+        _, ok = field_check(getattr(run.findings, f"{name}_url"), reference.get(name))
+        if ok is not None:
+            scored += 1
+            correct += int(ok)
+    return correct, scored
+
+
+def status_chip(run: AgentRun, winner: str | None) -> str:
+    if run.status == "waking":
+        return '<span class="chip wait">Waking endpoint…</span>'
+    if run.status == "waiting":
+        return '<span class="chip wait">Starting…</span>'
+    if run.status == "running":
+        return '<span class="chip run"><span class="dot-live"></span>Running</span>'
+    if run.findings is None:
+        return '<span class="chip err">✗ No answer</span>'
+    if winner == run.side:
+        return '<span class="chip ok">🏁 Finished first</span>'
+    return '<span class="chip done">✓ Finished</span>'
+
+
+def friendly_error(error: str) -> str:
+    lowered = error.lower()
+    if "maximum context length" in lowered or "context length" in lowered:
+        message = "Ran out of context: the conversation outgrew the model's 64K-token window."
+    elif "timed out" in lowered:
+        message = "Ran out of time before submitting an answer."
+    elif "tool-call budget" in lowered:
+        message = "Hit the tool-call budget before submitting an answer."
+    elif "not configured or not reachable" in lowered:
+        message = "The student endpoint is unavailable right now."
+    else:
+        message = "The run stopped with an error."
+    return (
+        f'<div class="error">⚠ {message}<details><summary>Details</summary><code>{esc(error, 1000)}</code>'
+        "</details></div>"
+    )
+
+
+def stat(label: str, value: str) -> str:
+    return f'<div class="stat"><div class="stat-label">{label}</div><div class="stat-value">{value}</div></div>'
 
 
 def render_column(run: AgentRun | None, reference: dict[str, Any] | None, winner: str | None) -> str:
     if run is None:
-        return '<div class="col empty">Enter a paper and press <b>Race</b>.</div>'
+        return '<div class="col empty">Pick an example or enter an arXiv paper, then press <b>Race</b>.</div>'
+    side = SIDES[run.side]
     tokens_in, tokens_out = run.tokens()
-    tool_count = len(run.tool_parts())
-    cost = run.cost()
-    cost_note = "router price" if run.side == "teacher" else "GPU time"
-    crown = " 🏁 finished first" if winner == run.side else ""
+    tools = len(run.tool_parts())
     header = (
-        f'<div class="head {run.side}"><div class="name">{esc(run.label)}{crown}</div>'
-        f'<div class="stats"><span>⏱ {run.elapsed:.1f}s</span><span>🔧 {tool_count} tool calls</span>'
-        f'<span>🧮 {tokens_in:,} in (+{run.cached:,} cached) / {tokens_out:,} out</span><span>💲{cost:.4f} ({cost_note})</span></div></div>'
+        f'<div class="col-head"><div class="who"><span class="swatch {run.side}"></span>'
+        f'<div><div class="role">{side["role"]}</div><div class="model">{esc(run.label)}</div>'
+        f'<div class="detail">{side["detail"]}</div></div></div>{status_chip(run, winner)}</div>'
     )
-    body = []
-    index = 0
-    for part in run.parts():
+    stats = (
+        '<div class="stats">'
+        + stat("Time", f"{run.elapsed:.1f} s")
+        + stat("Tool calls", str(tools))
+        + stat("Tokens", f"{(tokens_in + run.cached + tokens_out) / 1000:.1f}K")
+        + stat("Cost", f"${run.cost():.4f}")
+        + "</div>"
+    )
+    parts = run.parts()
+    tool_positions = [i for i, part in enumerate(parts) if part.get("type") == "tool"]
+    last_tool = tool_positions[-1] if tool_positions else -1
+    steps, index = [], 0
+    for position, part in enumerate(parts):
+        rejected = False
         if part.get("type") == "tool":
             index += 1
-        body.append(render_part(part, index))
+            if part.get("tool") == "StructuredOutput":
+                # OpenCode keeps the session going when a submitted answer fails validation.
+                retried = position != last_tool
+                never_accepted = run.status == "done" and run.findings is None
+                rejected = retried or never_accepted
+        steps.append(render_step(part, index, rejected))
     if run.status == "waking":
-        body.append('<div class="thought pulse">Waking the student endpoint (scale-to-zero cold start, up to a few minutes)…</div>')
+        steps.append('<div class="placeholder">Waking the student endpoint. After 15 idle minutes it scales to zero, '
+                     "so the first race can wait a few minutes.</div>")
     elif run.status == "waiting":
-        body.append('<div class="thought">Starting… (a scaled-to-zero endpoint can take a few minutes to wake up)</div>')
+        steps.append('<div class="placeholder">Starting OpenCode…</div>')
     elif run.status == "running":
-        body.append('<div class="thought pulse">working…</div>')
-    result = ""
+        steps.append('<div class="placeholder pulse">Working…</div>')
+    answer = ""
     if run.status == "done":
         if run.findings is not None:
             rows = []
-            for name, label in (("github", "GitHub"), ("project_page", "Project page")):
+            for name, label in (("github", "GitHub repository"), ("project_page", "Project page")):
                 value = getattr(run.findings, f"{name}_url")
-                link = f'<a href="{esc(value)}" target="_blank">{esc(value)}</a>' if value else "<i>none</i>"
-                check = verdict(value, (reference or {}).get(name)) if reference is not None else ""
-                rows.append(f"<tr><th>{label}</th><td>{link}</td><td>{check}</td></tr>")
-            result = f'<div class="result"><table>{"".join(rows)}</table><p>{esc(run.findings.reasoning, 600)}</p></div>'
+                link = f'<a href="{esc(value)}" target="_blank" rel="noopener">{esc(value)}</a>' if value else '<span class="none">None found</span>'
+                check, _ = field_check(value, (reference or {}).get(name)) if reference is not None else ("", None)
+                rows.append(f'<div class="ans-row"><div class="ans-label">{label}</div><div class="ans-url">{link}</div><div class="ans-check">{check}</div></div>')
+            answer = (
+                f'<div class="answer"><div class="answer-title">Answer</div>{"".join(rows)}'
+                f'<details class="why"><summary>Why these URLs</summary><p>{esc(run.findings.reasoning, 1500)}</p></details></div>'
+            )
         if run.error:
-            result += f'<div class="error">{esc(run.error)}</div>'
+            answer += friendly_error(run.error)
         if run.findings is None and not run.error:
-            result += '<div class="error">No structured answer.</div>'
-    return f'<div class="col">{header}<div class="timeline">{"".join(body)}</div>{result}</div>'
+            answer += '<div class="error">⚠ The agent did not return a structured answer.</div>'
+    timeline = f'<div class="timeline">{"".join(steps)}</div>' if steps else ""
+    return f'<div class="col {run.side}">{header}{stats}{answer}{timeline}</div>'
+
+
+def render_scoreboard(runs: list[AgentRun] | None, reference: dict[str, Any] | None, winner: str | None) -> str:
+    if not runs:
+        return ""
+    rows = []
+    for run in runs:
+        correct, scored = run_score(run, reference)
+        if run.status != "done":
+            result = '<span class="muted">…</span>'
+        elif run.findings is None:
+            result = '<span class="pill err">✗ No answer</span>'
+        elif scored:
+            cls = "ok" if correct == scored else ("warn" if correct else "err")
+            icon = "✓" if correct == scored else ("⚠" if correct else "✗")
+            result = f'<span class="pill {cls}">{icon} {correct}/{scored} correct</span>'
+        else:
+            result = '<span class="pill na">— No labels</span>'
+        flag = " 🏁" if winner == run.side else ""
+        rows.append(
+            f'<tr><td><span class="swatch {run.side}"></span><b>{SIDES[run.side]["role"]}</b>{flag}'
+            f'<div class="sub">{esc(run.label)}</div></td><td class="num-cell">{run.elapsed:.1f} s</td>'
+            f'<td class="num-cell">{len(run.tool_parts())}</td><td class="num-cell">${run.cost():.4f}</td><td>{result}</td></tr>'
+        )
+    summary = ""
+    student, teacher = runs
+    if student.status == teacher.status == "done" and student.findings and teacher.findings:
+        bits = []
+        if student.cost() > 0 and teacher.cost() > 0:
+            ratio = teacher.cost() / student.cost()
+            bits.append(f"the student cost {ratio:.0f}× less" if ratio >= 1.5 else "both cost about the same")
+        s_ok, s_n = run_score(student, reference)
+        t_ok, t_n = run_score(teacher, reference)
+        if s_n and t_n:
+            bits.append("both got every verified URL right" if s_ok == s_n and t_ok == t_n else f"student {s_ok}/{s_n}, teacher {t_ok}/{t_n} correct")
+        fastest = "Student" if winner == "student" else "Teacher"
+        summary = f'<div class="summary">{fastest} finished first; {", ".join(bits)}.</div>' if bits else ""
+    return (
+        '<div class="board"><table><thead><tr><th>Agent</th><th class="num-cell">Time</th><th class="num-cell">Tool calls</th>'
+        f'<th class="num-cell">Cost</th><th>Result</th></tr></thead><tbody>{"".join(rows)}</tbody></table>{summary}</div>'
+    )
+
+
+def render_paper(meta: dict[str, Any], arxiv_id: str, source: str) -> str:
+    abstract = meta.get("abstract") or ""
+    return (
+        f'<div class="paper"><div class="paper-title">{esc(meta["title"])}</div>'
+        f'<div class="paper-links"><a href="https://huggingface.co/papers/{arxiv_id}" target="_blank" rel="noopener">hf.co/papers/{arxiv_id}</a>'
+        f' · <a href="https://arxiv.org/abs/{arxiv_id}" target="_blank" rel="noopener">arXiv</a>'
+        f' · answers checked against {esc(source)}</div>'
+        f'<details class="abstract"><summary>Abstract</summary><p>{esc(abstract, 3000)}</p></details></div>'
+    )
 
 
 CSS = """
-.col{border:1px solid var(--border-color-primary);border-radius:12px;padding:12px;min-height:420px;background:var(--background-fill-primary)}
-.col.empty{display:flex;align-items:center;justify-content:center;color:var(--body-text-color-subdued)}
-.head{border-radius:8px;padding:10px 12px;margin-bottom:10px;color:#fff}
-.head.student{background:linear-gradient(90deg,#ff9d00,#ff6a00)}.head.teacher{background:linear-gradient(90deg,#4f46e5,#7c3aed)}
-.head .name{font-weight:700;font-size:1.05em}.stats{display:flex;flex-wrap:wrap;gap:12px;font-size:.88em;margin-top:4px;opacity:.95}
-.timeline{display:flex;flex-direction:column;gap:6px}
-.call{border:1px solid var(--border-color-primary);border-left-width:4px;border-radius:8px;padding:2px 8px;background:var(--background-fill-secondary)}
-.call.ok{border-left-color:#16a34a}.call.err{border-left-color:#dc2626}.call.run{border-left-color:#f59e0b}
-.call summary{display:flex;align-items:center;gap:8px;cursor:pointer;padding:4px 0;list-style:none}
-.call summary code{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:.85em}
-.idx{font-size:.75em;color:var(--body-text-color-subdued);width:1.4em;text-align:right}.tool{font-weight:600;font-size:.88em}
-.dur{font-size:.8em;color:var(--body-text-color-subdued)}.mark{font-weight:700}
-.call pre{max-height:260px;overflow:auto;font-size:.78em;white-space:pre-wrap;word-break:break-word}
-.thought{font-size:.85em;color:var(--body-text-color-subdued);font-style:italic;padding:2px 6px}
+:root{--ink:#1f1f1d;--ink-2:#5f5e5a;--line:rgba(11,11,11,.12);--card:#ffffff;--soft:#f4f4f1;
+--student:#eb6834;--teacher:#2a78d6;--good:#0ca30c;--good-ink:#006300;--bad:#c62f2f;--warn:#8a5d00;--link:#2a62c4}
+.dark{--ink:#ecebe6;--ink-2:#a9a8a2;--line:rgba(255,255,255,.14);--card:#1f1f1d;--soft:#2a2a28;
+--good-ink:#3fc43f;--bad:#f06a6a;--warn:#fab219;--link:#7fb0ff}
+.paper,.board,.col,.step-body,.answer,.stat,.target,.output pre,.num,.chip,.pill{color:var(--ink)}
+.paper a,.answer a,.board a{color:var(--link)}
+.gradio-container{max-width:1280px!important}
+#intro p{font-size:1rem;line-height:1.55;color:var(--ink-2);max-width:900px}
+.paper{border:1px solid var(--line);border-radius:12px;padding:14px 16px;background:var(--card)}
+.paper-title{font-size:1.15rem;font-weight:650;line-height:1.35}
+.paper-links{font-size:.9rem;color:var(--ink-2);margin-top:4px}
+.abstract summary,.why summary,.output summary{cursor:pointer;color:var(--ink-2);font-size:.88rem}
+.abstract p{font-size:.92rem;line-height:1.55;margin:.5em 0 0}
+.board{border:1px solid var(--line);border-radius:12px;padding:6px 14px 10px;background:var(--card)}
+.board table{width:100%;border-collapse:collapse;font-size:.95rem;border:none!important;margin:0!important}
+.board tr{border:none!important}
+.board th,.board td{border-left:none!important;border-right:none!important;border-top:none!important;background:transparent!important}
+.board th{font-size:.78rem;font-weight:600;color:var(--ink-2);text-align:left;padding:8px 6px;border-bottom:1px solid var(--line)!important}
+.board td{padding:10px 6px;border-bottom:1px solid var(--line)!important;vertical-align:middle}
+.board tr:last-child td{border-bottom:none!important}
+.board .num-cell{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.board .sub{font-size:.8rem;color:var(--ink-2);margin-left:18px}
+.summary{margin-top:8px;font-size:.95rem;font-weight:500}
+.swatch{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:8px;vertical-align:baseline}
+.swatch.student{background:var(--student)}.swatch.teacher{background:var(--teacher)}
+.col{border:1px solid var(--line);border-radius:12px;padding:14px;background:var(--card);border-top-width:4px}
+.col.student{border-top-color:var(--student)}.col.teacher{border-top-color:var(--teacher)}
+.col.empty{min-height:160px;display:flex;align-items:center;justify-content:center;color:var(--ink-2);border-top-width:1px}
+.col-head{display:flex;justify-content:space-between;align-items:flex-start;gap:10px}
+.who{display:flex;align-items:flex-start}.who .swatch{margin-top:6px}
+.role{font-size:.78rem;font-weight:600;color:var(--ink-2);text-transform:uppercase;letter-spacing:.04em}
+.model{font-size:1.05rem;font-weight:650;line-height:1.3}
+.detail{font-size:.82rem;color:var(--ink-2)}
+.chip{font-size:.8rem;font-weight:600;padding:3px 10px;border-radius:999px;white-space:nowrap;border:1px solid var(--line);background:var(--soft)}
+.chip.ok{color:var(--good-ink)}.chip.err{color:var(--bad)}
+.dot-live{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--student);margin-right:6px;animation:pulse 1.2s infinite}
+.col.teacher .dot-live{background:var(--teacher)}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:12px 0}
+.stat{background:var(--soft);border-radius:8px;padding:8px 10px}
+.stat-label{font-size:.75rem;color:var(--ink-2)}
+.stat-value{font-size:1.2rem;font-weight:600;line-height:1.3}
+.answer{border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-bottom:12px}
+.answer-title{font-size:.78rem;font-weight:600;color:var(--ink-2);text-transform:uppercase;letter-spacing:.04em;margin-bottom:4px}
+.ans-row{display:grid;grid-template-columns:9.5em 1fr auto;gap:10px;align-items:start;padding:6px 0;border-bottom:1px solid var(--line)}
+.ans-row:last-of-type{border-bottom:none}
+.ans-label{font-size:.88rem;color:var(--ink-2)}
+.ans-url{font-size:.92rem;word-break:break-all}
+.ans-check{text-align:right}
+.none{color:var(--ink-2);font-style:italic}
+.pill{display:inline-block;font-size:.8rem;font-weight:600;padding:2px 9px;border-radius:999px;white-space:nowrap;border:1px solid var(--line)}
+.pill.ok{color:var(--good-ink)}.pill.err{color:var(--bad)}.pill.warn{color:var(--warn)}.pill.na{color:var(--ink-2)}
+.expected{font-size:.75rem;color:var(--ink-2);margin-top:3px;word-break:break-all;max-width:16em}
+.why p{font-size:.88rem;line-height:1.5;margin:.4em 0 0}
+.timeline{display:flex;flex-direction:column;gap:8px}
+.step{display:flex;gap:10px;align-items:flex-start}
+.num{flex:0 0 24px;height:24px;border-radius:50%;background:var(--soft);border:1px solid var(--line);font-size:.78rem;font-weight:600;display:flex;align-items:center;justify-content:center;margin-top:2px}
+.step.completed .num{border-color:var(--good)}.step.error .num{border-color:var(--bad)}
+.step-body{flex:1;min-width:0;border:1px solid var(--line);border-radius:8px;padding:8px 10px;background:var(--card)}
+.step-head{display:flex;justify-content:space-between;gap:8px;align-items:center}
+.step-label{font-weight:600;font-size:.93rem}
+.step-meta{display:flex;gap:8px;align-items:center;font-size:.8rem;color:var(--ink-2);white-space:nowrap;font-variant-numeric:tabular-nums}
+.badge{font-size:.75rem;font-weight:600}.badge.ok{color:var(--good-ink)}.badge.err{color:var(--bad)}.badge.run{color:var(--ink-2)}
+.target{display:block;margin-top:5px;font-size:.82rem;white-space:pre-wrap;word-break:break-all;background:var(--soft);padding:5px 7px;border-radius:6px;max-height:4.6em;overflow:hidden}
+.output{margin-top:5px}
+.output pre{max-height:280px;overflow:auto;font-size:.78rem;white-space:pre-wrap;word-break:break-word;background:var(--soft);padding:8px;border-radius:6px;margin:6px 0 0}
+.thought{font-size:.88rem;line-height:1.5;color:var(--ink-2);padding:2px 2px 2px 34px}
+.thought summary{list-style:none;cursor:pointer}
+.thought-tag{font-size:.7rem;font-weight:600;text-transform:uppercase;letter-spacing:.04em;margin-right:6px;border:1px solid var(--line);border-radius:4px;padding:0 4px}
+.more{margin-left:6px;text-decoration:underline;font-size:.8rem}
+.thought-full{margin-top:4px;white-space:pre-wrap}
+.placeholder{font-size:.9rem;color:var(--ink-2);padding:8px 2px 2px 34px}
 .pulse{animation:pulse 1.2s infinite}@keyframes pulse{50%{opacity:.35}}
-.result{margin-top:12px;border-radius:8px;padding:10px;background:var(--background-fill-secondary)}
-.result table{width:100%;font-size:.9em}.result th{text-align:left;width:7.5em}.result p{font-size:.85em;margin:.5em 0 0}
-.good{color:#16a34a;font-weight:600}.bad{color:#dc2626;font-weight:600}.na{color:var(--body-text-color-subdued)}
-.error{margin-top:8px;color:#dc2626;font-size:.85em}
-.paper{font-size:.92em}.paper b{font-size:1.05em}
+.error{margin:4px 0 12px;color:var(--bad);font-size:.9rem}
+.error summary{cursor:pointer;color:var(--ink-2);font-size:.8rem}.error code{display:block;color:var(--ink-2);font-size:.78rem;white-space:pre-wrap;margin-top:4px}
+.muted{color:var(--ink-2)}
+@media (max-width:760px){.stats{grid-template-columns:repeat(2,1fr)}.ans-row{grid-template-columns:1fr}.ans-check{text-align:left}}
 """
 
 
@@ -546,19 +759,24 @@ async def race(paper: str):
         priority=0,
         priority_source="space",
     )
-    info = (
-        f'<div class="paper"><b>{esc(meta["title"])}</b> · '
-        f'<a href="https://huggingface.co/papers/{arxiv_id}" target="_blank">{arxiv_id}</a><br>'
-        f"Both agents get the same prompt, tools and output schema. Checked against {esc(source)}.</div>"
-    )
+    info = render_paper(meta, arxiv_id, source)
     student = AgentRun("student", STUDENT_LABEL, "student", "")
-    teacher = AgentRun("teacher", f"{TEACHER_MODEL} (frontier teacher, Inference Providers)", "teacher", TEACHER_MODEL)
-    yield info, render_column(student, reference, None), render_column(teacher, reference, None)
+    teacher = AgentRun("teacher", TEACHER_MODEL, "teacher", TEACHER_MODEL)
+    runs = [student, teacher]
+
+    def frame(winner: str | None = None):
+        return (
+            info,
+            render_scoreboard(runs, reference, winner),
+            render_column(student, reference, winner),
+            render_column(teacher, reference, winner),
+        )
 
     student.status = "waking"
-    yield info, render_column(student, reference, None), render_column(teacher, reference, None)
+    yield frame()
     student.model = await asyncio.to_thread(student_model_id) or ""
     student.status = "waiting"
+    yield frame()
     workdir = Path(tempfile.mkdtemp(prefix="race-"))
     process, base_url = await start_opencode(workdir, opencode_config(student.model or None))
     try:
@@ -569,43 +787,45 @@ async def race(paper: str):
             else:
                 student.status, student.error = "done", "Student endpoint is not configured or not reachable."
             while not all(task.done() for task in tasks):
-                done = [r for r in (student, teacher) if r.status == "done" and r.findings]
-                winner = min(done, key=lambda r: r.elapsed).side if done else None
-                yield info, render_column(student, reference, winner), render_column(teacher, reference, winner)
+                done = [r for r in runs if r.status == "done" and r.findings]
+                yield frame(min(done, key=lambda r: r.elapsed).side if done else None)
                 await asyncio.sleep(0.6)
             await asyncio.gather(*tasks, return_exceptions=True)
     finally:
         with suppress(ProcessLookupError, PermissionError):
             os.killpg(process.pid, 15)
         shutil.rmtree(workdir, ignore_errors=True)
-    finished = [r for r in (student, teacher) if r.findings is not None and r.finished]
-    winner = min(finished, key=lambda r: r.elapsed).side if finished else None
-    yield info, render_column(student, reference, winner), render_column(teacher, reference, winner)
+    finished = [r for r in runs if r.findings is not None and r.finished]
+    yield frame(min(finished, key=lambda r: r.elapsed).side if finished else None)
 
 
 EXAMPLES = ["2604.12575", "2309.09958", "2604.11004", "2601.05851"]
 
 with gr.Blocks(title="Small agent vs. frontier teacher", css=CSS, theme=gr.themes.Soft()) as demo:
+    gr.Markdown("# Paper URL agent: fine-tuned 4B vs. frontier teacher")
     gr.Markdown(
-        "# 🏎️ Paper URL agent: fine-tuned 4B vs. frontier teacher\n"
-        "Both agents run in the unmodified **OpenCode** harness with the same tools, prompt and JSON schema. "
-        "The small model was distilled from the teacher's OpenCode traces (and optionally refined with GRPO through "
-        "OpenEnv). Enter an arXiv paper to watch them find its official **GitHub repo** and **project page**."
+        "Two agents race to find a paper's official **GitHub repository** and **project page**. Both run in the "
+        "unmodified OpenCode harness with the same tools, prompt and answer format. The student is a 4B model "
+        "distilled from the teacher's OpenCode traces.",
+        elem_id="intro",
     )
-    with gr.Row():
-        paper = gr.Textbox(label="arXiv ID or URL", placeholder="2604.12575", scale=4)
-        button = gr.Button("Race", variant="primary", scale=1)
-    gr.Examples(EXAMPLES, inputs=paper)
+    with gr.Row(equal_height=True):
+        paper = gr.Textbox(label="arXiv ID or URL", placeholder="e.g. 2604.12575", scale=5)
+        button = gr.Button("Race", variant="primary", scale=1, min_width=120)
+    gr.Examples(EXAMPLES, inputs=paper, label="Examples")
     paper_info = gr.HTML()
+    scoreboard = gr.HTML()
     with gr.Row(equal_height=False):
         left = gr.HTML(render_column(None, None, None))
         right = gr.HTML(render_column(None, None, None))
     gr.Markdown(
-        f"Each agent may use at most {MAX_TOOL_CALLS} tool calls and {EPISODE_TIMEOUT:g} s. Teacher cost uses router "
-        "prices from models.dev; student cost is the A10G endpoint's GPU time for this request."
+        f"Each agent gets at most {MAX_TOOL_CALLS} tool calls and {EPISODE_TIMEOUT:g} seconds. Teacher cost uses "
+        "Inference Providers prices from models.dev; student cost is the endpoint's GPU time for this request. "
+        "Click a step to see its output."
     )
-    button.click(race, paper, [paper_info, left, right], concurrency_limit=2)
-    paper.submit(race, paper, [paper_info, left, right], concurrency_limit=2)
+    outputs = [paper_info, scoreboard, left, right]
+    button.click(race, paper, outputs, concurrency_limit=2, show_progress="hidden")
+    paper.submit(race, paper, outputs, concurrency_limit=2, show_progress="hidden")
 
 if __name__ == "__main__":
     demo.queue(max_size=8).launch()
