@@ -719,7 +719,7 @@ def train(args: argparse.Namespace) -> None:
         push_to_hub=bool(args.hub_model_id),
         hub_model_id=args.hub_model_id,
         hub_strategy="checkpoint",
-        hub_private_repo=True,
+        hub_private_repo=not args.public,
     )
     peft_config = LoraConfig(
         r=args.lora_r,
@@ -739,7 +739,7 @@ def train(args: argparse.Namespace) -> None:
     trainer.train()
     trainer.save_model(args.output_dir)
     if args.hub_model_id:
-        trainer.model.push_to_hub(args.hub_model_id, private=True)
+        trainer.model.push_to_hub(args.hub_model_id, private=not args.public)
         print(f"[train] pushed adapter to {args.hub_model_id}", flush=True)
 
 
@@ -780,6 +780,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scratch-dir", default=None)
     parser.add_argument("--output-dir", default="runs/url-grpo")
     parser.add_argument("--hub-model-id", default=None)
+    parser.add_argument("--public", action="store_true", help="Publish the adapter and checkpoints publicly")
     parser.add_argument("--report-to", default="trackio")
     parser.add_argument("--trackio-space-id", default=None)
     parser.add_argument("--run-name", default=None)
