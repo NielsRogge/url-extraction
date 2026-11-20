@@ -5,7 +5,7 @@
 # buckets, and manage nielsr Inference Endpoints, plus ~10 GB of free private storage.
 #
 #   scripts/grpo_v2_full.sh launch      # one 2x H200 job (~1.5 h, ~$15); prints the job id
-#   scripts/grpo_v2_full.sh serve       # after the job completes: point endpoint + Space at the model
+#   scripts/grpo_v2_full.sh serve       # after the job completes: serve the model on the demo Space's GPU
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -14,7 +14,6 @@ BUCKET=nielsr/jobs-artifacts
 MERGED=nielsr/qwen35-4b-url-agent-grpo-v2-merged
 ADAPTER=nielsr/qwen35-4b-url-agent-grpo-v2-lora
 EVAL_REPO=nielsr/qwen35-4b-url-agent-eval-v2
-ENDPOINT=qwen35-4b-url-agent-vllm
 SPACE=nielsr/url-agent-race
 
 case "${1:-}" in
@@ -35,17 +34,19 @@ echo ALL_DONE"
     --volume "hf://buckets/$BUCKET:/artifacts" --detach huggingface/trl -- bash -c "$CMD"
   ;;
 serve)
+  # Serve the merged GRPO model on the demo Space's own GPU (no Inference Endpoint).
   python3 - <<PY
 import os
-from huggingface_hub import HfApi, update_inference_endpoint
-token = os.environ["HF_TOKEN"]
-api = HfApi(token=token)
+from huggingface_hub import HfApi
+api = HfApi(token=os.environ["HF_TOKEN"])
 sha = api.model_info("$MERGED").sha
-update_inference_endpoint("$ENDPOINT", namespace="nielsr", repository="$MERGED", revision=sha, token=token)
-print(f"endpoint now serves $MERGED@{sha}")
-api.add_space_variable("$SPACE", "STUDENT_LABEL", "Qwen3.5-4B URL agent (SFT v2 + GRPO, 1× A10G)")
-api.upload_folder(repo_id="$SPACE", repo_type="space", folder_path="space", ignore_patterns=["__pycache__/*"])
-print("Space updated")
+print(f"serving $MERGED@{sha}")
+api.add_space_variable("$SPACE", "STUDENT_MODEL", "$MERGED")
+api.add_space_variable("$SPACE", "HF_BILL_TO", "huggingface")
+api.upload_folder(repo_id="$SPACE", repo_type="space", folder_path="space",
+                  ignore_patterns=["__pycache__/*", ".gitignore"], commit_message="Serve the GRPO student on this Space")
+api.request_space_hardware("$SPACE", "l4x1", sleep_time=3600)
+print("Space updated; hardware l4x1, sleeps after 1 h idle")
 PY
   ;;
 *) echo "usage: $0 launch|serve" >&2; exit 2 ;;
