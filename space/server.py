@@ -75,7 +75,8 @@ def classify(part: dict[str, Any]) -> tuple[str, str, str]:
         return "glob", str(data.get("pattern") or ""), "listing files"
     if name == "StructuredOutput":
         urls = [data.get("github_url"), data.get("project_page_url")]
-        return "answer", " · ".join(str(u) for u in urls if u) or "no URLs", "submitting its answer"
+        urls = [str(u).strip() for u in urls if u and str(u).strip().lower() not in {"none", "null", ""}]
+        return "answer", " · ".join(urls) or "no URLs", "submitting its answer"
     return name or "tool", json.dumps(data)[:120], f"using {name}"
 
 
