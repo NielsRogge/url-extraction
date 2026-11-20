@@ -63,7 +63,8 @@ button:disabled{opacity:.45;cursor:default}
 .panel-head .count{font-family:var(--mono);font-weight:600;font-size:.88rem;white-space:nowrap}
 .icon{width:16px;height:16px;flex:0 0 16px}
 .rows{height:268px;overflow-y:auto;padding:10px 12px;font-family:var(--mono);font-size:.82rem;scroll-behavior:smooth}
-.row{display:flex;gap:10px;line-height:1.75;white-space:nowrap;animation:enter .25s ease-out}
+.row{display:flex;gap:10px;line-height:1.75;white-space:nowrap}
+.row.new{animation:enter .25s ease-out}
 .row .verb{flex:0 0 3.9em;font-weight:600;color:var(--verb)}
 .row .verb.quiet{color:var(--verb-quiet)}
 .row .verb.answer{color:var(--verb-answer)}
@@ -166,14 +167,16 @@ function renderRows(side, run) {
     box.innerHTML = `<div class="empty-rows">${msg}</div>`;
     return;
   }
+  const before = Number(box.dataset.n || 0);
   const html = run.rows.map((r, i) => {
     const live = run.status === "running" && i === run.rows.length - 1 && r.status !== "completed";
-    const cls = ["row", r.verb === "think" ? "think" : "", r.status === "rejected" ? "rejected" : "", r.status === "error" ? "error" : "", live ? "live" : ""].join(" ");
+    const cls = ["row", i >= before ? "new" : "", r.verb === "think" ? "think" : "", r.status === "rejected" ? "rejected" : "", r.status === "error" ? "error" : "", live ? "live" : ""].join(" ");
     const vcls = r.verb === "answer" ? "answer" : QUIET.has(r.verb) ? "quiet" : "";
     const tip = r.out ? `${r.arg}\n\n→ ${r.out}${r.out_len > r.out.length ? " …" : ""}` : r.arg;
     return `<div class="${cls}"><span class="verb ${vcls}">${esc(r.verb)}</span><span class="arg${r.arg === "writing…" ? " writing" : ""}" title="${esc(tip)}">${esc(r.arg)}</span></div>`;
   }).join("");
-  if (box.dataset.n !== String(run.rows.length) || box.dataset.s !== run.status) {
+  if (box.dataset.h !== html) {
+    box.dataset.h = html;
     box.innerHTML = html;
     box.dataset.n = String(run.rows.length);
     box.dataset.s = run.status;
@@ -233,7 +236,7 @@ function notice(text) { const n = $("notice"); n.textContent = text || ""; n.cla
 
 function busy(on) { $("go").disabled = on; document.querySelectorAll("[data-ex]").forEach((b) => (b.disabled = on)); $("replay").disabled = on || !frames.length; }
 
-function resetRows() { for (const s of ["teacher", "student"]) { const b = $("r-" + s); b.dataset.n = ""; b.dataset.s = ""; } }
+function resetRows() { for (const s of ["teacher", "student"]) { const b = $("r-" + s); b.dataset.n = ""; b.dataset.s = ""; b.dataset.h = ""; } }
 
 function start(paper) {
   if (!paper.trim()) return;

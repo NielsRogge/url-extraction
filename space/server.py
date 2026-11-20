@@ -54,9 +54,11 @@ def classify(part: dict[str, Any]) -> tuple[str, str, str]:
     state = part.get("state") or {}
     data = state.get("input") or {}
     name = part.get("tool", "")
-    if not data and state.get("status") in (None, "pending", "running"):
+    if state.get("status") in (None, "pending", "running") and (not data or name == "StructuredOutput"):
+        # Arguments stream in as partial JSON (an answer's reasoning arrives before its URLs), so a call
+        # is only shown once its input is complete.
         verb = {"bash": "shell", "webfetch": "fetch", "StructuredOutput": "answer"}.get(name, name or "tool")
-        return verb, "writing…", "writing a tool call"
+        return verb, "writing…", "writing its answer" if name == "StructuredOutput" else "writing a tool call"
     if name == "bash":
         command = str(data.get("command") or "").strip()
         if command.startswith("hf papers info"):
