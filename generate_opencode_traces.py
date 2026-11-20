@@ -526,8 +526,13 @@ async def async_main(args: argparse.Namespace) -> None:
                         max_tool_calls=args.max_tool_calls,
                     )
                     record["attempt"] = attempt
-                    with args.output.open("a") as handle:
-                        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+                    try:
+                        line = json.dumps(record, ensure_ascii=False)
+                        line.encode("utf-8")
+                    except UnicodeEncodeError:  # lone surrogates from tool output; escaped form is still valid JSON
+                        line = json.dumps(record)
+                    with args.output.open("a", encoding="utf-8") as handle:
+                        handle.write(line + "\n")
                         handle.flush()
                     print(
                         f"  {row['arxiv_id']} attempt={attempt} accepted={record['accepted']} "
