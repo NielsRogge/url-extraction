@@ -390,9 +390,28 @@ async def run_agent(client: AsyncOpencode, run: AgentRun, candidate: PaperCandid
     with suppress(Exception):
         run.messages = await raw_json(client, "get", f"/session/{session_id}/message")
     structured = (response.get("info") or {}).get("structured")
-    if structured is not None:
+    if structured is None:
+        # Fall back to the last StructuredOutput call OpenCode accepted.
+        for part in reversed(run.parts()):
+            if part.get("type") == "tool" and part.get("tool") == "StructuredOutput":
+                structured = (part.get("state") or {}).get("input")
+                break
+    if isinstance(structured, dict):
         with suppress(Exception):
             run.findings = URLFindings.model_validate(structured)
+        if run.findings is None:
+            # OpenCode accepted this answer; read its URLs leniently (missing reasoning, extra keys,
+            # URL strings with stray text) so the page shows what the agent actually answered.
+            def url(value: Any) -> str | None:
+                match = re.search(r"https?://\S+", str(value or ""))
+                return match.group(0).rstrip(").,;") if match else None
+
+            with suppress(Exception):
+                run.findings = URLFindings(
+                    reasoning=str(structured.get("reasoning") or ""),
+                    github_url=url(structured.get("github_url")),
+                    project_page_url=url(structured.get("project_page_url")),
+                )
     if run.findings is None:
         run.findings = findings_from_messages(run.messages)
     errors = [((m.get("info") or {}).get("error") or {}) for m in run.messages]

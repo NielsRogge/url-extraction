@@ -80,10 +80,23 @@ def classify(part: dict[str, Any]) -> tuple[str, str, str]:
     return name or "tool", json.dumps(data)[:120], f"using {name}"
 
 
-def verdict(predicted: str | None, expected: str | None) -> str:
+def verdict(predicted: str | None, expected: str | None, aliases: tuple[str, ...] = ()) -> str:
     if expected == "unknown":
         return "unlabelled"
-    return "correct" if canonical_url(predicted) == canonical_url(expected) else "wrong"
+    targets = {canonical_url(expected), *(canonical_url(a) for a in aliases)}
+    return "correct" if canonical_url(predicted) in targets else "wrong"
+
+
+async def github_aliases(url: str | None) -> tuple[str, ...]:
+    """Where a labelled GitHub URL redirects today (renamed/transferred repos keep their old URL as a redirect)."""
+    if not url or "github.com/" not in url:
+        return ()
+    with suppress(Exception):
+        async with httpx.AsyncClient(follow_redirects=True, timeout=8) as client:
+            final = str((await client.head(url)).url)
+            if canonical_url(final) != canonical_url(url):
+                return (final,)
+    return ()
 
 
 def friendly_error(error: str | None) -> str | None:
@@ -133,7 +146,7 @@ def run_snapshot(run: AgentRun, reference: dict[str, Any]) -> dict[str, Any]:
         for name in ("github", "project_page"):
             url = getattr(run.findings, f"{name}_url")
             expected = reference.get(name)
-            v = verdict(url, expected)
+            v = verdict(url, expected, tuple(reference.get(f"{name}_aliases") or ()))
             answer[name] = {"url": url, "verdict": v, "expected": None if v != "wrong" else expected}
             if v != "unlabelled":
                 scored += 1
@@ -234,6 +247,7 @@ async def race_events(arxiv_id: str):
         yield sse("failed", {"message": str(exc)[:300]})
         return
     reference, source = reference_for(arxiv_id, meta)
+    reference = {**reference, "github_aliases": await github_aliases(reference.get("github"))}
     paper = {"id": arxiv_id, "title": meta["title"], "source": source}
     candidate = PaperCandidate(
         paper_id=0,
