@@ -54,6 +54,9 @@ def classify(part: dict[str, Any]) -> tuple[str, str, str]:
     state = part.get("state") or {}
     data = state.get("input") or {}
     name = part.get("tool", "")
+    if not data and state.get("status") in (None, "pending", "running"):
+        verb = {"bash": "shell", "webfetch": "fetch", "StructuredOutput": "answer"}.get(name, name or "tool")
+        return verb, "writing…", "writing a tool call"
     if name == "bash":
         command = str(data.get("command") or "").strip()
         if command.startswith("hf papers info"):
@@ -166,6 +169,7 @@ def run_snapshot(run: AgentRun, reference: dict[str, Any]) -> dict[str, Any]:
         "correct": correct,
         "scored": scored,
         "error": friendly_error(run.error) if run.status == "done" else None,
+        "error_detail": (run.error or "")[:400] if run.status == "done" else None,
         "doing": doing,
         "thoughts": thoughts,
     }
@@ -306,6 +310,16 @@ async def race_events(arxiv_id: str):
                 os.killpg(process.pid, 15)
             shutil.rmtree(workdir, ignore_errors=True)
         yield frame()
+        for run in (student, teacher):
+            snap = run_snapshot(run, reference)
+            tool_errors = [r for r in snap["rows"] if r["status"] == "error"]
+            print(
+                f"[race] {arxiv_id} {run.side}: {snap['correct']}/{snap['scored']} correct, "
+                f"{snap['tool_calls']} tool calls, {snap['elapsed']}s, answer={'yes' if snap['answer'] else 'no'}"
+                + (f", error={run.error!r}" if run.error else "")
+                + "".join(f"\n    tool error: {r['verb']} {r['arg'][:80]!r} -> {r['out'][:200]!r}" for r in tool_errors),
+                flush=True,
+            )
         yield sse("done", {})
 
 

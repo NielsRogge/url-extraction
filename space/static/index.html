@@ -72,7 +72,9 @@ button:disabled{opacity:.45;cursor:default}
 .row.think .verb{color:var(--muted);font-weight:400}
 .row.think .arg{color:var(--muted);font-family:"Source Sans 3",sans-serif;font-style:italic;font-size:.9rem}
 .note{margin-top:4px;font-size:.8rem;color:var(--muted);font-style:italic}
+.note.err-detail{font-style:normal;font-family:var(--mono);font-size:.74rem;color:var(--bad-ink);word-break:break-word}
 .row.error .verb{color:var(--bad-ink)}
+.row .arg.writing{color:var(--muted);font-style:italic}
 .row.live .arg::after{content:" ▍";animation:blink 1s steps(1) infinite;color:var(--muted)}
 .empty-rows{color:var(--muted);font-family:"Source Sans 3",sans-serif;font-size:.9rem;padding-top:4px}
 @keyframes enter{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:none}}
@@ -169,7 +171,7 @@ function renderRows(side, run) {
     const cls = ["row", r.verb === "think" ? "think" : "", r.status === "rejected" ? "rejected" : "", r.status === "error" ? "error" : "", live ? "live" : ""].join(" ");
     const vcls = r.verb === "answer" ? "answer" : QUIET.has(r.verb) ? "quiet" : "";
     const tip = r.out ? `${r.arg}\n\n→ ${r.out}${r.out_len > r.out.length ? " …" : ""}` : r.arg;
-    return `<div class="${cls}"><span class="verb ${vcls}">${esc(r.verb)}</span><span class="arg" title="${esc(tip)}">${esc(r.arg)}</span></div>`;
+    return `<div class="${cls}"><span class="verb ${vcls}">${esc(r.verb)}</span><span class="arg${r.arg === "writing…" ? " writing" : ""}" title="${esc(tip)}">${esc(r.arg)}</span></div>`;
   }).join("");
   if (box.dataset.n !== String(run.rows.length) || box.dataset.s !== run.status) {
     box.innerHTML = html;
@@ -209,7 +211,8 @@ function renderOutcome(side, run, winner, budget) {
     `${run.elapsed.toFixed(1)} s · ${(run.tokens / 1000).toFixed(1)}K tokens · $${run.cost.toFixed(4)}`;
   const quiet = run.status === "done" && run.side === "student" && !run.thoughts && run.tool_calls
     ? `<div class="note">No visible reasoning: this model was trained on the teacher's tool calls only.</div>` : "";
-  $("m-" + side).innerHTML = esc(meta) + quiet;
+  const detail = run.error_detail ? `<div class="note err-detail">${esc(run.error_detail)}</div>` : "";
+  $("m-" + side).innerHTML = esc(meta) + detail + quiet;
 }
 
 function render(p) {
