@@ -714,6 +714,12 @@ def train(args: argparse.Namespace) -> None:
         log_completions=False,
         logging_steps=1,
         seed=args.seed,
+        # Push every saved checkpoint as it is written (latest under `last-checkpoint/`, resumable), so a
+        # crash, a full disk or the end of the job never loses the run.
+        push_to_hub=bool(args.hub_model_id),
+        hub_model_id=args.hub_model_id,
+        hub_strategy="checkpoint",
+        hub_private_repo=True,
     )
     peft_config = LoraConfig(
         r=args.lora_r,
