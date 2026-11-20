@@ -477,7 +477,7 @@ async def run_one(
     }
 
 
-def accepted_ids(path: Path) -> set[int]:
+def accepted_ids(path: Path, *, any_attempt: bool = False) -> set[int]:
     if not path.exists():
         return set()
     ids: set[int] = set()
@@ -485,7 +485,7 @@ def accepted_ids(path: Path) -> set[int]:
         for line in handle:
             try:
                 record = json.loads(line)
-                if record.get("accepted"):
+                if any_attempt or record.get("accepted"):
                     ids.add(int(record["paper_id"]))
             except (ValueError, KeyError, json.JSONDecodeError):
                 continue
@@ -505,7 +505,7 @@ async def async_main(args: argparse.Namespace) -> None:
     elif not args.include_unscoreable:
         rows = [row for row in rows if row_all_requested_scoreable(row)]
     rows = rows[args.start : args.start + args.limit]
-    done = accepted_ids(args.output) if args.resume else set()
+    done = accepted_ids(args.output, any_attempt=args.resume_attempted) if args.resume else set()
     rows = [row for row in rows if int(row["paper_id"]) not in done]
     args.output.parent.mkdir(parents=True, exist_ok=True)
     async with (
@@ -582,6 +582,11 @@ def parse_args() -> argparse.Namespace:
         help="Research rows with at least one verified requested label; accept when every verified field matches",
     )
     parser.add_argument("--no-resume", action="store_false", dest="resume")
+    parser.add_argument(
+        "--resume-attempted",
+        action="store_true",
+        help="On resume, skip every paper already in --output, not only accepted ones (avoids re-paying for rejects)",
+    )
     parser.set_defaults(resume=True)
     args = parser.parse_args()
     load_dotenv(args.env_file)
