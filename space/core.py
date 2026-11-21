@@ -70,7 +70,7 @@ BILL_TO = os.environ.get("HF_BILL_TO", "").strip() or None
 STUDENT_URL = os.environ.get("STUDENT_URL", "http://127.0.0.1:8000").rstrip("/")
 STUDENT_LABEL = os.environ.get("STUDENT_LABEL", "Qwen3.5-4B · SFT + GRPO")
 STUDENT_GPU_PER_HOUR = float(os.environ.get("STUDENT_GPU_PER_HOUR", "0.80"))
-TEACHER_MODEL = os.environ.get("TEACHER_MODEL", "zai-org/GLM-5.2")
+TEACHER_MODEL = os.environ.get("TEACHER_MODEL", "zai-org/GLM-5.3")
 TEACHER_ROUTER = "https://router.huggingface.co/v1"
 LABEL_DATASET = os.environ.get("LABEL_DATASET", "nielsr/paper-url-extraction-v1")
 

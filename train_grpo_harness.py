@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import collections
 import json
 import logging
 import os
@@ -139,6 +140,22 @@ def load_rows(
         rows = [row for row in rows if str(row["arxiv_id"]) in include_ids]
     random.Random(seed).shuffle(rows)
     return rows[:limit] if limit else rows
+
+
+def weight_by_tier(rows: list[dict[str, Any]], exclude: str, weights: str, seed: int) -> list[dict[str, Any]]:
+    """Drop excluded difficulty tiers and repeat harder tiers (e.g. "3:2,5:3") so RL sees them more often."""
+    drop = {int(t) for t in exclude.split(",") if t.strip()}
+    repeat = {int(k): int(v) for k, v in (item.split(":") for item in weights.split(",") if item.strip())}
+    out = []
+    for row in rows:
+        tier = row.get("difficulty_tier")
+        if tier is not None and int(tier) in drop:
+            continue
+        out.extend([row] * repeat.get(int(tier) if tier is not None else -1, 1))
+    random.Random(seed).shuffle(out)
+    tiers = collections.Counter(r.get("difficulty_tier") for r in out)
+    print(f"[train] prompt pool by difficulty tier (after weighting): {dict(sorted(tiers.items(), key=lambda kv: str(kv[0])))}", flush=True)
+    return out
 
 
 def correctness(row: dict[str, Any], findings: URLFindings | None) -> float:
@@ -667,6 +684,7 @@ def train(args: argparse.Namespace) -> None:
     if args.include_ids_file:
         include = {line.strip() for line in Path(args.include_ids_file).read_text().splitlines() if line.strip()}
     rows = load_rows(args.dataset, args.split, exclude, args.n_prompts, args.seed, include)
+    rows = weight_by_tier(rows, args.exclude_tiers, args.tier_weights, args.seed)
     vllm_url = f"http://127.0.0.1:{args.vllm_port}"
     factory = partial(
         make_factory,
@@ -760,6 +778,8 @@ def parse_args() -> argparse.Namespace:
         default=0.0,
         help="Fraction of correctness credit withheld when the research protocol was not followed",
     )
+    parser.add_argument("--exclude-tiers", default="", help="Difficulty tiers to drop, e.g. '7' (labels found nowhere)")
+    parser.add_argument("--tier-weights", default="", help="Repeat factors per tier, e.g. '3:2,4:2,5:3,6:2'")
     parser.add_argument("--n-prompts", type=int, default=None)
     parser.add_argument("--num-generations", type=int, default=8)
     parser.add_argument("--max-concurrent-rollouts", type=int, default=16)
