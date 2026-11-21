@@ -818,6 +818,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--epsilon-high", type=float, default=0.28)
     parser.add_argument("--max-train-tokens", type=int, default=49152, help="simple trainer: longest trained sequence")
     parser.add_argument("--attention-chunk-size", type=int, default=1024)
+    parser.add_argument("--log-rollouts", action="store_true", help="simple trainer: one diagnostic line per rollout")
     return parser.parse_args()
 
 
@@ -946,11 +947,33 @@ def train_simple(args: argparse.Namespace) -> None:
             httpx.post(f"{vllm_url}/v1/unload_lora_adapter", json={"lora_name": stale}, timeout=120)
         return name
 
+    def describe(session: Any, started: float, **extra: Any) -> str:
+        """One-line rollout diagnostics: outcome, and per model call its duration, tokens and finish reason."""
+        calls = []
+        for message in session.messages:
+            info = message.get("info") or {}
+            if info.get("role") != "assistant":
+                continue
+            times = info.get("time") or {}
+            tokens = info.get("tokens") or {}
+            parts = [part.get("type") for part in message.get("parts", []) if part.get("type") not in ("step-start", "step-finish")]
+            calls.append({
+                "s": round(((times.get("completed") or times.get("created") or 0) - (times.get("created") or 0)) / 1000, 1),
+                "out": tokens.get("output"), "reasoning": tokens.get("reasoning"), "finish": info.get("finish"),
+                "parts": parts, "error": str(((info.get("error") or {}).get("data") or {}).get("message") or "")[:160] or None,
+            })
+        return json.dumps({
+            "arxiv": session.candidate.arxiv_id, "secs": round(time.monotonic() - started, 1), "failure": session.failure,
+            "findings": session.findings.model_dump(mode="json") if session.findings else None, "calls": calls, **extra,
+        })[:4000]
+
     def run_rollout(row: dict[str, Any]) -> dict[str, Any] | None:
         session = factory.create([{"role": "user", "content": user_prompt(candidate_from_row(row))}])
+        started = time.monotonic()
         try:
             try:
                 if session.wait_for_completion():
+                    print("[rollout] dropped " + describe(session, started), flush=True)
                     return None
             except TimeoutError:
                 pass  # a timed-out episode with a valid capture still scores (usually 0): long loops get no credit
@@ -962,9 +985,13 @@ def train_simple(args: argparse.Namespace) -> None:
             tool_calls = int(getattr(session, "tool_calls", 0) or 0)
             if reward >= 1.0:
                 reward += W_TOOL_EFFICIENCY * max(0.0, min(1.0, 1.0 - tool_calls / TOOL_BUDGET))
+            if args.log_rollouts:
+                print("[rollout] " + describe(session, started, reward=round(reward, 3), turns=len(trace.turns)), flush=True)
             return {"reward": reward, "trace": trace, "tool_calls": tool_calls, "failure": session.failure}
         except Exception as exc:  # noqa: BLE001 - unscorable rollouts are dropped, never fatal
             logger.warning("rollout %s dropped: %s", row.get("arxiv_id"), exc)
+            with suppress(Exception):
+                print("[rollout] error " + describe(session, started, error=str(exc)[:300]), flush=True)
             return None
         finally:
             session.close()
