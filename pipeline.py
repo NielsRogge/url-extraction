@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # /// script
 # requires-python = ">=3.12"
-# dependencies = ["huggingface-hub>=1.13.0"]
+# dependencies = ["huggingface-hub>=1.13.0", "pydantic>=2.10.0,<2.13"]
 # ///
 """Distil any teacher into any student: traces -> SFT -> GRPO -> eval -> Hub publishing, on HF Jobs.
 
@@ -63,8 +63,9 @@ STAGED_FILES = (
     "merge_adapter.py",
     "difficulty_probe.py",
     "trace_export.py",
+    "pipeline.py",
 )
-STAGED_PACKAGES = ("harness",)
+STAGED_PACKAGES = ("harness", "profiles")  # profiles: an orchestrator job runs pipeline.py from the snapshot
 
 # Recipe defaults shared by every pair (student profiles append their own arguments after these, and the
 # last occurrence of a flag wins).
@@ -596,6 +597,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--probe-exclude-tiers", default="", help="Probe only train papers outside these tiers, e.g. 7")
     parser.add_argument("--grpo-merge-only", action="store_true", help="GRPO stage: merge the pushed adapter, no training")
     parser.add_argument("--rev", help="Reuse already staged code (code/<rev>/ in the code repo)")
+    parser.add_argument("--commit", help="Code commit to record (default: git rev-parse HEAD)")
+    parser.add_argument(
+        "--orchestrate",
+        action="store_true",
+        help="Stage the code, record the run manifest, and run the whole pipeline in a cpu-basic job",
+    )
+    parser.add_argument("--orchestrator-timeout", default="48h")
     parser.add_argument("--wait", action="store_true", help="Wait for the jobs of a single stage")
     parser.add_argument("--dry-run", action="store_true", help="Print the jobs; stage and launch nothing")
     args = parser.parse_args(argv)
@@ -630,8 +638,48 @@ def build_jobs(stage: str, run: Run, rev: str, args: argparse.Namespace) -> list
     return [job for wave in build_waves(stage, run, rev, args) for job in wave]
 
 
+def git_commit() -> str:
+    import subprocess
+
+    try:
+        sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True, check=True).stdout.strip()
+        dirty = subprocess.run(["git", "status", "--porcelain"], cwd=ROOT, capture_output=True, text=True).stdout.strip()
+        return sha + ("-dirty" if dirty else "")
+    except (OSError, subprocess.CalledProcessError):
+        return "unknown"
+
+
+def record_run(run: Run, rev: str, args: argparse.Namespace, argv: list[str]) -> None:
+    """Write the run manifest (command, code commit, staged snapshot) to the eval repo: pipeline/run-<rev>.json."""
+    from huggingface_hub import HfApi
+
+    manifest = {
+        "run": run.name, "teacher": run.teacher.name, "student": run.student.name, "dataset": run.dataset,
+        "commit": args.commit, "code_snapshot": f"{run.code_repo}@code/{rev}", "stages": args.stages,
+        "command": "uv run pipeline.py " + shlex.join(argv), "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "artifacts": {repo: kind for repo, kind, _ in run.artifacts()},
+    }  # fmt: skip
+    if args.dry_run:
+        print(f"[dry-run] manifest for {run.eval_repo}/pipeline/run-{rev}.json: {json.dumps(manifest)}")
+        return
+    api = HfApi()
+    api.create_repo(run.eval_repo, repo_type="dataset", private=False, exist_ok=True)
+    api.upload_file(path_or_fileobj=json.dumps(manifest, indent=2).encode(), path_in_repo=f"pipeline/run-{rev}.json",
+                    repo_id=run.eval_repo, repo_type="dataset", commit_message=f"Pipeline run {rev} at {args.commit}")  # fmt: skip
+    print(f"recorded run manifest {run.eval_repo}/pipeline/run-{rev}.json (commit {args.commit})", flush=True)
+
+
+def launch_orchestrator(run: Run, rev: str, args: argparse.Namespace, argv: list[str]) -> None:
+    """Run this pipeline (all stages and waits) inside a small CPU job, from the pinned code snapshot."""
+    child = [arg for arg in argv if arg != "--orchestrate"] + ["--rev", rev, "--commit", args.commit]
+    command = "\n".join([prelude(run, rev), f"uv run pipeline.py {shlex.join(child)}"])
+    launch([Job("orchestrate", f"{run.name}-pipeline", UV_IMAGE, "cpu-basic", args.orchestrator_timeout, command, {})], args)
+
+
 def main(argv: list[str] | None = None) -> None:
+    argv = list(sys.argv[1:] if argv is None else argv)
     args = parse_args(argv)
+    args.commit = args.commit or git_commit()
     run = make_run(args)
     missing = run.student.missing_requirements(ROOT)
     if missing and set(args.stages) - {"publish"}:
@@ -642,6 +690,13 @@ def main(argv: list[str] | None = None) -> None:
     print(f"run {run.name}: {run.teacher.name} ({run.teacher.opencode_model}) -> {run.student.name} ({run.student.model}) "
           f"on {run.dataset}; stages {','.join(args.stages)}", flush=True)  # fmt: skip
     rev = args.rev
+    if args.orchestrate:
+        if args.commit.endswith("-dirty") and not args.dry_run:
+            raise SystemExit("commit or stash local changes first: the run records its code commit")
+        rev = rev or stage_code(run, args)
+        record_run(run, rev, args, argv)
+        launch_orchestrator(run, rev, args, argv)
+        return
     for stage in args.stages:
         if stage == "publish":
             publish(run, args)
