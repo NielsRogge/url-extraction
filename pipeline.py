@@ -275,11 +275,14 @@ def sft_job(run: Run, rev: str, args: argparse.Namespace) -> Job:
 def grpo_job(run: Run, rev: str, args: argparse.Namespace) -> Job:
     student = run.student
     grpo = student.grpo
-    merge_sft = merger(
-        student,
-        ["--base-model", q(student.model), "--adapter", q(run.sft_adapter), "--card-base-model", q(student.model),
-         "--card-adapter", q(run.sft_adapter), "--hub-model-id", q(run.sft_merged), "--public", "--output", "/model"],
-    )  # fmt: skip
+    if args.reuse_sft_merged:  # already published (e.g. a rerun): start from it instead of merging again
+        merge_sft = f"{HF_CLI} download {q(run.sft_merged)} --local-dir /model >/dev/null"
+    else:
+        merge_sft = merger(
+            student,
+            ["--base-model", q(student.model), "--adapter", q(run.sft_adapter), "--card-base-model", q(student.model),
+             "--card-adapter", q(run.sft_adapter), "--hub-model-id", q(run.sft_merged), "--public", "--output", "/model"],
+        )  # fmt: skip
     train = [
         "--launch", "--model", "/model", "--dataset", q(run.dataset), "--output-dir", "/grpo-run",
         "--hub-model-id", q(run.grpo_adapter), "--public", "--lora-r", str(student.lora.rank),
@@ -293,9 +296,11 @@ def grpo_job(run: Run, rev: str, args: argparse.Namespace) -> Job:
     if args.grpo_ids:
         train += ["--include-ids-file", Path(args.grpo_ids).name]
     train += grpo.args
+    # --grpo-merge-only: recovery when training pushed the adapter but a later step failed (no retraining).
+    adapter = q(run.grpo_adapter) if args.grpo_merge_only else "/grpo-run"
     merge_grpo = merger(
         student,
-        ["--base-model", "/model", "--adapter", "/grpo-run", "--card-base-model", q(student.model),
+        ["--base-model", "/model", "--adapter", adapter, "--card-base-model", q(student.model),
          "--card-adapter", q(run.grpo_adapter), "--hub-model-id", q(run.grpo_merged), "--public",
          "--output", "/grpo-merged"],
     )  # fmt: skip
@@ -303,7 +308,7 @@ def grpo_job(run: Run, rev: str, args: argparse.Namespace) -> Job:
         [
             prelude(run, rev, image_vllm=student.serve.vllm == "image"),
             merge_sft,
-            python("train_grpo_harness.py", train, deps=grpo.deps or None),
+            *([] if args.grpo_merge_only else [python("train_grpo_harness.py", train, deps=grpo.deps or None)]),
             merge_grpo,
             "echo GRPO_DONE",
         ]
@@ -502,6 +507,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--run-name", help="Artifact name prefix (default: <student>-url-agent-<teacher>)")
     for name in ("traces-repo", "sft-adapter", "sft-merged", "grpo-adapter", "grpo-merged", "eval-repo", "code-repo"):
         parser.add_argument(f"--{name}", help=f"Override the {name.replace('-', ' ')} repo id")
+    parser.add_argument("--grpo-merge-only", action="store_true", help="GRPO stage: merge the pushed adapter, no training")
+    parser.add_argument("--reuse-sft-merged", action="store_true",
+                        help="GRPO stage: start from the published SFT merge (automatic when it exists)")  # fmt: skip
     parser.add_argument("--rev", help="Reuse already staged code (code/<rev>/ in the code repo)")
     parser.add_argument("--wait", action="store_true", help="Wait for the jobs of a single stage")
     parser.add_argument("--dry-run", action="store_true", help="Print the jobs; stage and launch nothing")
@@ -537,6 +545,13 @@ def main(argv: list[str] | None = None) -> None:
         print(f"warning: {message}; a real run would stop here", flush=True)
     print(f"run {run.name}: {run.teacher.name} ({run.teacher.opencode_model}) -> {run.student.name} ({run.student.model}) "
           f"on {run.dataset}; stages {','.join(args.stages)}", flush=True)  # fmt: skip
+    if "grpo" in args.stages and not args.reuse_sft_merged and "sft" not in args.stages:
+        from huggingface_hub import HfApi
+
+        try:
+            args.reuse_sft_merged = HfApi().repo_exists(run.sft_merged)
+        except Exception:  # noqa: BLE001 - offline dry runs merge again
+            pass
     rev = args.rev
     for stage in args.stages:
         if stage == "publish":

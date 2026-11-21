@@ -40,7 +40,8 @@ rollout runs locally in its own temporary workspace with its own OpenCode databa
 Reward (`harness.scoring`, the same `score_episode` the evaluator records): fraction of verified URL fields
 that are correct (0 without a structured answer), with `--protocol-weight` of that credit withheld when the
 episode is incomplete (research protocol skipped or `--max-tool-calls` reached), plus a small tool-efficiency
-bonus `0.1 * (1 - tool_calls / 15)` only when every verified field is correct and the episode complete.
+bonus `0.1 * (1 - tool_calls / 15)` only on full credit (every verified field correct and, with a protocol
+weight, a complete episode).
 
 Run on a two-GPU node with `--launch` (starts vLLM on GPU 0, the trainer on GPU 1).
 """

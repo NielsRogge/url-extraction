@@ -55,8 +55,9 @@ uv run generate_opencode_traces.py --split test --limit 500 --attempts-per-row 1
 for i in 0 1 2; do uv run generate_opencode_traces.py --split train --start $((i*578)) --limit 578 \
   --accept-partial --attempts-per-row 1 --concurrency 4 --resume-attempted \
   --model huggingface/moonshotai/Kimi-K3.1-Pro --output runs/kimi-train-$i.jsonl & done; wait
-scripts/kimi_9b_pipeline.sh sft                 # 1x H200: SFT + eval base vs SFT
-ROLLOUTS=16 scripts/kimi_9b_pipeline.sh grpo    # 2x H200: merge, GRPO, merge, eval vs merged SFT
+# SFT (1x H200), GRPO (2x H200), evaluation: see pipeline.md for the full command with this run's repo names
+uv run pipeline.py --teacher kimi-k3.1-pro --student qwen3.5-9b --grpo-ids scripts/rl-kimi-9b-ids.txt \
+  --traces-repo nielsr/paper-url-opencode-traces-kimi --traces-files train-kimi-k31.jsonl --stages sft,grpo,eval
 ```
 
 `scripts/rl-kimi-9b-ids.txt` is the GRPO prompt pool: the 1,134 train papers where Kimi got a URL
@@ -73,7 +74,7 @@ Notes from this run:
   -9, `posix_spawn` returning `EAGAIN`). With `--max-concurrent-rollouts 16` it ran cleanly at the same
   speed, because the trainer, not rollout generation, is the bottleneck.
 - `merge_adapter.py` wrote the local path `/model` as `base_model` in the model card, which the Hub
-  rejects. `--card-base-model` now names the Hub model. `scripts/kimi_9b_pipeline.sh grpo-finish` redoes
+  rejects. `--card-base-model` now names the Hub model. `pipeline.py --stages grpo,eval --grpo-merge-only` redoes
   the merge and evaluation from the pushed GRPO adapter without retraining.
 - `generate_opencode_traces.py --resume-attempted` resumes without paying again for papers that were
   attempted but rejected. Trace records containing lone UTF-16 surrogates (math symbols in paper text)

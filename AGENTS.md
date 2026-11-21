@@ -47,7 +47,7 @@ git push origin --delete claude/new-feature
 - Agent traces must always be uploaded in a form the Hub's [agent-traces viewer](https://huggingface.co/docs/hub/en/agent-traces) can open: one Pi-format session per episode under `sessions/`, produced by `trace_export.py`. Never upload episode JSONL with full trajectories (teacher traces, evaluation episodes) on its own; slim summaries such as `difficulty_probe.py` attempts are exempt.
   - `generate_opencode_traces.py --output-repo ...` and `evaluate_vllm.py --output-repo ...` already publish the sessions; prefer them over manual uploads.
   - After any other upload (e.g. `hf upload`, bucket copies promoted to a dataset), run `uv run trace_export.py --repo <dataset>` (optionally `--files <path>`).
-  - New scripts that publish episodes must call `trace_export.publish_sessions`, and HF Jobs code staging must include `trace_export.py`.
+  - New scripts that publish episodes must call `trace_export.publish_sessions`, and HF Jobs code staging must include `trace_export.py` and the `harness/` package (`pipeline.py` stages both).
   - Check that the dataset page shows the traces in Data Studio before reporting the upload as done.
 
 Example:

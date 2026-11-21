@@ -59,61 +59,46 @@ agents' reasoning and tool calls side by side. Source in [`space/`](space/).
 
 ## Run the recipe
 
-Requirements: an `HF_TOKEN` allowed to call Inference Providers (billed to `HF_BILL_TO`, default
-`huggingface`) and to run HF Jobs, and OpenCode 1.2.4 for trace generation.
+Teachers and students are pluggable: each model is a small profile in [`profiles/`](profiles/) (provider
+pin, vLLM image and parsers, GPU flavors, LoRA targets, GRPO backend, ...), and one entry point runs
+traces -> SFT -> GRPO -> eval -> Hub publishing as HF Jobs:
 
 ```bash
-uv venv && uv sync --extra traces --prerelease allow
+uv run pipeline.py --teacher kimi-k3.1-pro --student qwen3.5-9b --dataset nielsr/paper-url-extraction-v1
+uv run pipeline.py --teacher glm-5.2 --student qwen3.5-4b --stages eval --splits test,test_hard --dry-run
 ```
 
-Generate teacher traces. Any OpenCode `provider/model` string works as the teacher:
+Requirements: an `HF_TOKEN` that can call Inference Providers (billed to `huggingface`), run Jobs in the
+`huggingface` namespace and write the target repos. Every stage also runs on its own (`--stages`), and
+`--dry-run` prints each job. Profiles, stages, artifact names and how to add a model:
+[docs/pipeline.md](docs/pipeline.md).
 
-```bash
-uv run generate_opencode_traces.py --split train --limit 2000 --accept-partial \
-  --attempts-per-row 1 --concurrency 4 --resume-attempted \
-  --model huggingface/zai-org/GLM-5.3 --output runs/teacher-train.jsonl
-```
-
-SFT, then evaluate base vs. SFT in OpenCode with vLLM (one H200):
-
-```bash
-uv run train_sft.py --traces runs/teacher-train.jsonl --model Qwen/Qwen3.5-4B --no-4bit \
-  --max-length 32768 --epochs 1 --full-trajectory --output /sft --hub-model-id <you>/<student>-lora
-uv run evaluate_vllm.py --split test --limit 50 --base-model Qwen/Qwen3.5-4B --adapter /sft \
-  --concurrency 8 --episode-timeout 180 --max-tool-calls 15 --max-model-len 65536 \
-  --max-output-tokens 1024 --output /eval/test.jsonl --output-repo <you>/<student>-eval --tag sft/
-```
-
-GRPO from the merged SFT model (two H200s: vLLM on one, the trainer on the other):
-
-```bash
-uv run merge_adapter.py --base-model Qwen/Qwen3.5-4B --adapter <you>/<student>-lora --hub-model-id '' --output /model
-uv run train_grpo_harness.py --launch --model /model --include-ids-file scripts/rl-v2-ids.txt \
-  --protocol-weight 0.5 --num-generations 8 --max-concurrent-rollouts 16 --max-steps 100 \
-  --gradient-accumulation-steps 2 --output-dir /grpo-run --hub-model-id <you>/<student>-grpo-lora
-```
-
-[`scripts/grpo_v2_full.sh`](scripts/grpo_v2_full.sh) and
-[`scripts/kimi_9b_pipeline.sh`](scripts/kimi_9b_pipeline.sh) run these stages as HF Jobs end to end.
+All stages share one harness package (`harness/`: prompt, answer schema, OpenCode episode runner and the
+single scorer), so a teacher trace is accepted, an evaluation episode is scored and a GRPO rollout is
+rewarded by the same code (`tests/test_parity.py`).
 
 ## Repository map
 
 | Path | Purpose |
 |---|---|
+| `pipeline.py`, `profiles/` | Entry point and teacher/student profiles ([docs/pipeline.md](docs/pipeline.md)) |
+| `harness/` | Task, scorer, OpenCode runner, profile loader, rescoring of published records |
 | `generate_opencode_traces.py` | Teacher trajectories in OpenCode, verified against labels |
 | `train_sft.py` | LoRA SFT on accepted trajectories |
 | `train_grpo_harness.py` | GRPO in OpenCode via TRL `HarnessAsyncGRPOTrainer` + OpenEnv capture |
 | `evaluate_vllm.py` | Paired base vs. adapter evaluation in OpenCode, served by vLLM |
-| `trace_export.py` | Episodes as Pi sessions for the Hub agent-traces viewer ([docs/data.md](docs/data.md)) |
 | `merge_adapter.py` | Merge a LoRA into a standalone checkpoint |
+| `trace_export.py` | Episodes as Pi sessions for the Hub agent-traces viewer ([docs/data.md](docs/data.md)) |
 | `validate_labels.py`, `tier_labels.py`, `difficulty_probe.py`, `mine_papers.py` | Label validation, difficulty tiers, RL prompt selection, mining harder papers ([docs/data.md](docs/data.md)) |
-| `space/` | Side-by-side demo Space |
-| `url_extraction_agent/` | Shared prompt, schema and research-protocol checks; production batch runner |
+| `space/`, `scripts/serve_space.py` | Side-by-side demo Space and its deployment |
+| `url_extraction_agent/` | Production batch runner |
 | `deploy_endpoint.py`, `run_endpoint_agent.py`, `prepare_canary.py`, `finalize_evaluation.py`, `convert_mlx.py` | Serving and production runs ([docs/deployment.md](docs/deployment.md)) |
 | `train_opencode.py` | Legacy one-step GRPO smoke test ([docs/legacy-train-opencode.md](docs/legacy-train-opencode.md)) |
 
 ## Further reading
 
+- [docs/pipeline.md](docs/pipeline.md): harness, profiles, pipeline stages, and the rescoring of every
+  published evaluation with the unified scorer.
 - [docs/EXPERIMENT_glm52_qwen35-4b.md](docs/EXPERIMENT_glm52_qwen35-4b.md): the full 4B history (SFT v1/v2,
   GRPO v1/v2, design notes on the OpenEnv capture proxy and the reward).
 - [docs/EXPERIMENT_kimi-k31_qwen35-9b.md](docs/EXPERIMENT_kimi-k31_qwen35-9b.md): the 9B run, its cost and compute.
