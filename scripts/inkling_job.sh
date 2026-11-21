@@ -17,6 +17,9 @@ CODE_REPO=nielsr/inkling-2-mini-url-agent-code
 EVAL_REPO=nielsr/inkling-2-mini-url-agent-eval
 VLLM_IMAGE=vllm/vllm-openai:inkling-2-mini
 MINI=thinkingmachines/Inkling-2-Mini
+TRACES_REPO=nielsr/inkling-2-mini-url-agent-traces
+TRACES_FILE=${TRACES_FILE:-train-inkling.jsonl}
+SFT_REPO=nielsr/inkling-2-mini-url-agent-lora
 # The inkling-2-mini image ships Blackwell kernels only (sm_100/sm_103 + an SM12x path); H200 (sm_90)
 # fails with "no kernel image is available" in csrc/inkling2/conv_mix.cu. Serve on RTX PRO 6000.
 SERVE_FLAVOR=${SERVE_FLAVOR:-rtx-pro-6000}
@@ -44,7 +47,8 @@ rev = sys.argv[1]
 api = HfApi()
 api.create_repo("nielsr/inkling-2-mini-url-agent-code", private=True, exist_ok=True)
 files = ["evaluate_vllm.py", "generate_opencode_traces.py", "train_sft.py", "merge_adapter.py",
-         "train_grpo_harness.py", "scripts/rl-v2-ids.txt"]
+         "train_grpo_harness.py", "inkling_train_patch.py", "inkling_adapter.py", "scripts/rl-v2-ids.txt"]
+files += [f for f in sys.argv[2:]]
 for f in files:
     api.upload_file(path_or_fileobj=f, path_in_repo=f"code/{rev}/{f.split('/')[-1]}",
                     repo_id="nielsr/inkling-2-mini-url-agent-code")
@@ -86,5 +90,24 @@ echo EVAL_DONE"
   hf jobs run --namespace "$NS" --name "inkling-eval-${TAG%/}-$SPLIT" --flavor "$SERVE_FLAVOR" --timeout 3h --secrets HF_TOKEN \
     --detach "$VLLM_IMAGE" -- bash -c "$CMD"
   ;;
-*) echo "usage: $0 stage | smoke REV | eval REV SPLIT TAG [args...]" >&2; exit 2 ;;
+sft)
+  # 1x H200: LoRA SFT of Inkling-2-Mini on the teacher's accepted trajectories (transformers only, no vLLM).
+  REV=${2:?REV}; shift 2
+  CMD="set -euo pipefail
+command -v uv >/dev/null || pip install -q uv
+mkdir -p /work && cd /work
+uvx --from 'huggingface-hub>=1.13' hf download $CODE_REPO --include 'code/$REV/*' --local-dir /work/stage >/dev/null
+cp -r /work/stage/code/$REV/. /work/
+uvx --from 'huggingface-hub>=1.13' hf download $TRACES_REPO $TRACES_FILE --repo-type dataset --local-dir /work >/dev/null
+nvidia-smi --query-gpu=name,memory.total --format=csv || true
+uv run --no-project --python 3.12 --with torch --with transformers==5.24.0 --with trl==1.18.2 --with peft==0.22.0 \
+  --with accelerate==1.16.0 --with datasets --with pillow --with torchvision --with safetensors \
+  python train_sft.py --traces /work/$TRACES_FILE --model $MINI --full-trajectory --no-4bit --max-length 32768 \
+    --epochs 1 --lora-rank 64 --gradient-accumulation 16 --save-steps 10 --save-total-limit 2 \
+    --output /out/sft --hub-model-id $SFT_REPO $*
+echo SFT_DONE"
+  hf jobs run --namespace "$NS" --name inkling-mini-sft --flavor h200 --timeout 8h --secrets HF_TOKEN \
+    --detach ghcr.io/astral-sh/uv:python3.12-bookworm -- bash -c "$CMD"
+  ;;
+*) echo "usage: $0 stage [extra files] | smoke REV | eval REV SPLIT TAG [args...] | sft REV [args...]" >&2; exit 2 ;;
 esac
