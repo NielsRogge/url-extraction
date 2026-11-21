@@ -1,14 +1,30 @@
 #!/usr/bin/env python3
 """Score trace/evaluation JSONL files with evaluate_vllm.summarize: field accuracy, exact matches, tool calls.
 
-    uv run --no-project --with ... python scripts/score_records.py FILE.jsonl [FILE.jsonl ...]
+    python scripts/score_records.py [--rescore DATASET] FILE.jsonl [FILE.jsonl ...]
+
+`--rescore` recomputes each record's verification from its stored findings against DATASET's rows (e.g. the
+validated dataset with `reference_*_aliases`), using the current alias-aware `score_findings`.
 """
 import json
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from evaluate_vllm import SCOREABLE_QUALITIES, summarize  # noqa: E402
+from evaluate_vllm import SCOREABLE_QUALITIES, URLFindings, score_findings, summarize  # noqa: E402
+
+ROWS: dict[int, dict] = {}
+
+
+def rescored(record: dict) -> dict:
+    row = ROWS[int(record["paper_id"])]
+    findings = URLFindings.model_validate(record["findings"]) if record.get("findings") else None
+    if findings is not None:
+        verification = score_findings(row, findings)
+    else:
+        verification = {"fields": {}, "num_scoreable": 0, "all_scoreable_correct": False}
+    qualities = {name: row.get(f"{name}_label_quality") if row.get(f"missing_{name}") else None for name in ("github", "project_page")}
+    return dict(record, verification=verification, label_quality=qualities)
 
 
 def normalized(record: dict) -> dict:
@@ -23,8 +39,18 @@ def normalized(record: dict) -> dict:
     return dict(record, verification=verification, evaluation_model="base")
 
 
-for path in sys.argv[1:]:
+paths = sys.argv[1:]
+if paths and paths[0] == "--rescore":
+    from datasets import load_dataset
+
+    for split in ("train", "validation", "test"):
+        for row in load_dataset(paths[1], split=split):
+            ROWS[int(row["paper_id"])] = dict(row)
+    paths = paths[2:]
+for path in paths:
     records = [json.loads(line) for line in open(path)]
+    if ROWS:
+        records = [rescored(r) for r in records]
     labels = {record.get("evaluation_model") for record in records}
     for label in sorted(label for label in labels if label) or [None]:
         selected = [normalized(r) for r in records if label is None or r.get("evaluation_model") == label]
