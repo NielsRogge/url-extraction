@@ -117,7 +117,7 @@ def main(args: argparse.Namespace) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--name", default=DEFAULT_NAME)
-    parser.add_argument("--namespace", default="nielsr")
+    parser.add_argument("--namespace", default="huggingface")
     parser.add_argument("--repo", default=DEFAULT_REPO)
     parser.add_argument("--revision")
     parser.add_argument("--vendor", default="aws")

@@ -547,7 +547,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--hf-bill-to",
-        help="HF Team/Enterprise organization to bill (or set HF_BILL_TO)",
+        help="HF organization to bill (or set HF_BILL_TO; default: huggingface)",
     )
     parser.add_argument("--base-url", help="Attach to an existing `opencode serve` instance")
     parser.add_argument("--opencode-command", default="opencode")
@@ -570,7 +570,7 @@ def parse_args() -> argparse.Namespace:
         if not token:
             parser.error("--use-hf-cli-token requires an authenticated `hf auth login` session")
         os.environ["HF_TOKEN"] = token
-    args.hf_bill_to = args.hf_bill_to or os.environ.get("HF_BILL_TO")
+    args.hf_bill_to = args.hf_bill_to or os.environ.get("HF_BILL_TO") or "huggingface"
     args.model = args.model or os.environ.get("OPENCODE_TEACHER_MODEL", DEFAULT_MODEL)
     return args
 
