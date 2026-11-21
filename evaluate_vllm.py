@@ -27,6 +27,7 @@ import json
 import os
 import platform
 import re
+import shlex
 import shutil
 import signal
 import socket
@@ -651,7 +652,7 @@ def wait_for_server(process: subprocess.Popen, timeout: float = 900) -> None:
 
 def start_vllm(args: argparse.Namespace, adapter_path: str) -> subprocess.Popen:
     command = [
-        shutil.which("vllm") or "vllm",
+        shutil.which(args.vllm_binary) or args.vllm_binary,
         "serve",
         args.base_model,
         "--host",
@@ -662,18 +663,20 @@ def start_vllm(args: argparse.Namespace, adapter_path: str) -> subprocess.Popen:
         str(args.max_model_len),
         "--gpu-memory-utilization",
         str(args.gpu_memory_utilization),
-        "--enforce-eager",
-        "--language-model-only",
         "--enable-auto-tool-choice",
         "--tool-call-parser",
-        "qwen3_coder",
-        "--enable-lora",
-        "--max-lora-rank",
-        "32",
-        "--lora-modules",
-        f"url-agent={adapter_path}",
+        args.tool_call_parser,
     ]
-    print("Starting vLLM with the base model and URL-agent LoRA", flush=True)
+    if args.enforce_eager:
+        command.append("--enforce-eager")
+    if args.language_model_only:
+        command.append("--language-model-only")
+    if args.reasoning_parser:
+        command += ["--reasoning-parser", args.reasoning_parser]
+    if adapter_path:
+        command += ["--enable-lora", "--max-lora-rank", str(args.max_lora_rank), "--lora-modules", f"url-agent={adapter_path}"]
+    command += shlex.split(args.vllm_extra_args)
+    print(f"Starting vLLM ({'base model and URL-agent LoRA' if adapter_path else 'base model only'}): {shlex.join(command)}", flush=True)
     return subprocess.Popen(command, start_new_session=True)
 
 
@@ -682,6 +685,14 @@ def prepare_text_adapter(source: str, destination: Path) -> str:
     from safetensors.torch import load_file, save_file
 
     source_path = Path(source)
+    from safetensors import safe_open
+
+    with safe_open(str(source_path / "adapter_model.safetensors"), framework="pt") as handle:
+        if any(".language_model.layers." in name and ".self_attn." in name for name in handle.keys()):
+            # Inkling 2: rename transformers' attention modules to the checkpoint names vLLM's LoRA loader expects.
+            from inkling_adapter import convert_adapter
+
+            return str(convert_adapter(source_path, destination))
     if destination.exists():
         shutil.rmtree(destination)
     shutil.copytree(source_path, destination, ignore=shutil.ignore_patterns("adapter_model.safetensors"))
@@ -731,8 +742,8 @@ def configure_opencode(args: argparse.Namespace) -> None:
                     "name": "Local vLLM",
                     "options": {"baseURL": "http://127.0.0.1:8000/v1", "apiKey": "EMPTY"},
                     "models": {
-                        args.base_model: {"name": "Qwen3.5-4B base", "limit": model_limit},
-                        "url-agent": {"name": "Qwen3.5-4B URL-agent LoRA", "limit": model_limit},
+                        args.base_model: {"name": f"{args.base_model} base", "limit": model_limit},
+                        "url-agent": {"name": f"{args.base_model} URL-agent LoRA", "limit": model_limit},
                     },
                 }
             },
@@ -771,7 +782,7 @@ async def evaluate(args: argparse.Namespace, output_path: Path) -> None:
         raise ValueError("No fully scoreable held-out rows selected")
     done = completed_keys(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    models = [("base", args.base_model), ("adapter", "url-agent")]
+    models = [("base", args.base_model), ("adapter", "url-agent")] if args.adapter else [("base", args.base_model)]
 
     async with (
         opencode_server(str(args.opencode_binary)) as base_url,
@@ -909,7 +920,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit", type=int, default=50)
     parser.add_argument("--paper-ids", help="Comma-separated paper IDs; overrides --start and --limit")
     parser.add_argument("--base-model", default=BASE_MODEL)
-    parser.add_argument("--adapter", default=ADAPTER_ID)
+    parser.add_argument("--adapter", default=ADAPTER_ID, help="LoRA adapter repo or dir; '' evaluates the base model only")
     parser.add_argument("--output", type=Path, default=Path("/artifacts/qwen35-4b-url-agent-eval/validation.jsonl"))
     parser.add_argument("--output-repo", default="nielsr/qwen35-4b-url-agent-eval")
     parser.add_argument("--tag", default="", help="Prefix for published file names, e.g. 'sft-v2/'")
@@ -920,6 +931,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-model-len", type=int, default=65536)
     parser.add_argument("--max-output-tokens", type=int, default=1024)
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.85)
+    parser.add_argument("--vllm-binary", default="vllm", help="vLLM executable, e.g. the one in a model-specific image")
+    parser.add_argument("--tool-call-parser", default="qwen3_coder")
+    parser.add_argument("--reasoning-parser", default="", help="e.g. 'inkling'; empty disables reasoning parsing")
+    parser.add_argument("--max-lora-rank", type=int, default=32)
+    parser.add_argument("--enforce-eager", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--language-model-only", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--vllm-extra-args", default="", help="Extra arguments appended to `vllm serve` (shell-quoted)")
     return parser.parse_args()
 
 
@@ -930,10 +948,12 @@ def main(args: argparse.Namespace) -> None:
     args.opencode_binary = install_opencode(workdir / "bin" / "opencode")
     os.environ["PATH"] = str(args.opencode_binary.parent) + os.pathsep + os.environ["PATH"]
     configure_opencode(args)
-    adapter_snapshot = (
-        args.adapter if Path(args.adapter).is_dir() else snapshot_download(args.adapter, token=os.environ["HF_TOKEN"])
-    )
-    adapter_path = prepare_text_adapter(adapter_snapshot, workdir / "text-adapter")
+    adapter_path = ""
+    if args.adapter:
+        adapter_snapshot = (
+            args.adapter if Path(args.adapter).is_dir() else snapshot_download(args.adapter, token=os.environ["HF_TOKEN"])
+        )
+        adapter_path = prepare_text_adapter(adapter_snapshot, workdir / "text-adapter")
     server = start_vllm(args, adapter_path)
     try:
         wait_for_server(server)

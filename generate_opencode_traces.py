@@ -204,20 +204,32 @@ def portable_trajectory(messages: list[dict[str, Any]], final: URLFindings | Non
         if role != "assistant":
             continue
         text_parts: list[str] = []
+        # The teacher's reasoning is kept as `reasoning_content` on the assistant message that follows it
+        # (the field chat templates such as Inkling 2's and Qwen3.5's render as a thinking block).
+        reasoning_parts: list[str] = []
+
+        def assistant(content: str, **extra: Any) -> dict[str, Any]:
+            entry: dict[str, Any] = {"role": "assistant", "content": content, **extra}
+            if reasoning_parts:
+                entry["reasoning_content"] = "\n\n".join(reasoning_parts)
+                reasoning_parts.clear()
+            return entry
+
         for part in message.get("parts", []):
-            if part.get("type") == "text" and part.get("text"):
+            if part.get("type") == "reasoning" and str(part.get("text") or "").strip():
+                reasoning_parts.append(str(part["text"]).strip())
+            elif part.get("type") == "text" and part.get("text"):
                 text_parts.append(str(part["text"]))
             elif part.get("type") == "tool":
                 if text_parts:
-                    result.append({"role": "assistant", "content": "\n".join(text_parts)})
+                    result.append(assistant("\n".join(text_parts)))
                     text_parts.clear()
                 state = part.get("state") or {}
                 call_id = str(part.get("callID") or part.get("id"))
                 result.append(
-                    {
-                        "role": "assistant",
-                        "content": "",
-                        "tool_calls": [
+                    assistant(
+                        "",
+                        tool_calls=[
                             {
                                 "id": call_id,
                                 "type": "function",
@@ -227,7 +239,7 @@ def portable_trajectory(messages: list[dict[str, Any]], final: URLFindings | Non
                                 },
                             }
                         ],
-                    }
+                    )
                 )
                 output = str(state.get("output") if state.get("status") == "completed" else state.get("error") or "")
                 if len(output) > MAX_PORTABLE_TOOL_OUTPUT_CHARS:
@@ -235,8 +247,8 @@ def portable_trajectory(messages: list[dict[str, Any]], final: URLFindings | Non
                         output[:MAX_PORTABLE_TOOL_OUTPUT_CHARS] + "\n[tool output truncated in portable trajectory]"
                     )
                 result.append({"role": "tool", "tool_call_id": call_id, "content": output})
-        if text_parts:
-            result.append({"role": "assistant", "content": "\n".join(text_parts)})
+        if text_parts or reasoning_parts:
+            result.append(assistant("\n".join(text_parts)))
     used_structured_output = any(
         call.get("function", {}).get("name", "").lower() == "structuredoutput"
         for message in result
