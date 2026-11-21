@@ -118,7 +118,7 @@ grpo)
   # GRPO_TEST=1 runs 2 tiny steps on the base model without merging or publishing.
   REV=${2:?REV}; shift 2
   TRAIN="uv run --no-project --python 3.12 --with torch --with transformers==5.24.0 --with trl==1.18.2 --with peft==0.22.0 --with accelerate==1.16.0 --with openenv==0.14.0 --with datasets>=4.0.0 --with httpx>=0.27.0 --with huggingface-hub>=1.13.0 --with opencode-ai==0.1.0a36 --with pydantic>=2.10.0,<2.13 --with safetensors>=0.4.0 --with aiohttp>=3.13.3 --with requests --with pillow --with torchvision python"
-  GRPO_ARGS="--launch --trainer simple --vllm-binary \$(command -v vllm) --tool-call-parser inkling --reasoning-parser inkling --include-ids-file rl-inkling-ids.txt --protocol-weight 0.5 --temperature 1.0 --lora-r 64 --max-completion-length 4096 --max-model-calls 16 --episode-timeout 180 --report-to none"
+  GRPO_ARGS="--launch --trainer simple --vllm-binary \$(command -v vllm) --tool-call-parser inkling --reasoning-parser inkling --include-ids-file rl-inkling-ids.txt --protocol-weight 0.5 --temperature 1.0 --lora-r 64 --max-completion-length 4096 --max-model-calls 16 --episode-timeout 180 --max-train-tokens 32768 --attention-chunk-size 512 --report-to none"
   if [ -n "${GRPO_TEST:-}" ]; then
     BODY="\$TRAIN train_grpo_harness.py $GRPO_ARGS --model $MINI --max-steps 2 --prompts-per-step 2 --num-generations 4 --max-concurrent-rollouts 8 --output-dir /grpo-test --hub-model-id '' $*"
     NAME=inkling-mini-grpo-test; TIMEOUT=1h

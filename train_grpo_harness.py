@@ -658,6 +658,10 @@ def start_vllm(args: argparse.Namespace) -> subprocess.Popen:
         command += ["--weight-transfer-config", '{"backend":"nccl"}']
     if args.reasoning_parser:
         command += ["--reasoning-parser", args.reasoning_parser]
+    if args.vllm_extra_args:
+        import shlex
+
+        command += shlex.split(args.vllm_extra_args)
     env = {
         **os.environ,
         "CUDA_VISIBLE_DEVICES": args.vllm_device,
@@ -818,6 +822,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--epsilon-high", type=float, default=0.28)
     parser.add_argument("--max-train-tokens", type=int, default=49152, help="simple trainer: longest trained sequence")
     parser.add_argument("--attention-chunk-size", type=int, default=1024)
+    parser.add_argument("--vllm-extra-args", default="", help="Extra arguments appended to `vllm serve` (shell-quoted)")
     parser.add_argument("--log-rollouts", action="store_true", help="simple trainer: one diagnostic line per rollout")
     return parser.parse_args()
 
@@ -1038,6 +1043,7 @@ def train_simple(args: argparse.Namespace) -> None:
                     dropped += lost
                     samples.append(((result["reward"] - mean) / (std + 1e-4), chains))
             total_tokens = sum(len(positions) for _, chains in samples for _, positions, _ in chains)
+            max_seq_tokens = max((len(ids) for _, chains in samples for ids, _, _ in chains), default=0)
             stats = {"ratio_sum": 0.0, "ratio_max": 0.0, "ratio_min": math.inf, "clipped": 0, "loss": 0.0}
             model.train()
             if total_tokens:
@@ -1070,6 +1076,7 @@ def train_simple(args: argparse.Namespace) -> None:
                 "rollouts": len(rewards),
                 "trained_tokens": total_tokens,
                 "dropped_tokens": dropped,
+                "max_seq_tokens": max_seq_tokens,
                 "importance_ratio_mean": stats["ratio_sum"] / total_tokens if total_tokens else None,
                 "importance_ratio_min": stats["ratio_min"] if total_tokens else None,
                 "importance_ratio_max": stats["ratio_max"] if total_tokens else None,
@@ -1120,6 +1127,7 @@ def main() -> None:
         child_args = [arg for arg in sys.argv[1:] if arg != "--launch"]
         child_args += ["--opencode-binary", str(args.opencode_binary)]
         env = {**os.environ, "CUDA_VISIBLE_DEVICES": args.train_device}
+        env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
         code = subprocess.call([sys.executable, __file__, *child_args], env=env)
         if code:
             raise SystemExit(code)
