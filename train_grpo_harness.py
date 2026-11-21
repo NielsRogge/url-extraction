@@ -1003,7 +1003,10 @@ def train_simple(args: argparse.Namespace) -> None:
                 reward += W_TOOL_EFFICIENCY * max(0.0, min(1.0, 1.0 - tool_calls / TOOL_BUDGET))
             if args.log_rollouts:
                 print("[rollout] " + describe(session, started, reward=round(reward, 3), turns=len(trace.turns)), flush=True)
-            return {"reward": reward, "trace": trace, "tool_calls": tool_calls, "failure": session.failure}
+            return {
+                "reward": reward, "trace": trace, "tool_calls": tool_calls, "failure": session.failure,
+                "seconds": time.monotonic() - started,
+            }
         except Exception as exc:  # noqa: BLE001 - unscorable rollouts are dropped, never fatal
             logger.warning("rollout %s dropped: %s", row.get("arxiv_id"), exc)
             with suppress(Exception):
@@ -1104,6 +1107,10 @@ def train_simple(args: argparse.Namespace) -> None:
                 "rollout_seconds": round(rollout_seconds, 1),
                 "step_seconds": round(time.monotonic() - started, 1),
             }
+            # Collapse indicators from the harness-adapters recipe: turns and episode length per rollout.
+            finished = [r for group in groups.values() for r in group]
+            record["tool_calls_mean"] = round(sum(r["tool_calls"] for r in finished) / len(finished), 2) if finished else None
+            record["episode_seconds_mean"] = round(sum(r["seconds"] for r in finished) / len(finished), 1) if finished else None
             record["groups_with_signal"] = sum(
                 1 for group in groups.values() if len(group) > 1 and max(r["reward"] for r in group) - min(r["reward"] for r in group) > 1e-6
             )
