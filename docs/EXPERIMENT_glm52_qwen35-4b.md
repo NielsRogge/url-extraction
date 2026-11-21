@@ -309,7 +309,7 @@ After storage was freed, GRPO v2 was retrained with checkpoint pushes to public 
 [`nielsr/qwen35-4b-url-agent-grpo-v2-lora`](https://huggingface.co/nielsr/qwen35-4b-url-agent-grpo-v2-lora)
 and the merged [`nielsr/qwen35-4b-url-agent-grpo-v2-merged`](https://huggingface.co/nielsr/qwen35-4b-url-agent-grpo-v2-merged)
 (the model served in the demo Space), via the former `scripts/grpo_v2_full.sh` (now
-`pipeline.py --stages grpo,eval`, see [pipeline.md](pipeline.md#reproducing-the-existing-pairs)). Its evaluation against the merged
+`pipeline.py --stages merge,grpo,eval`, see [pipeline.md](pipeline.md#reproducing-the-existing-pairs)). Its evaluation against the merged
 SFT v2 checkpoint was mixed: test field accuracy 79.8% -> 82.1%, validation 93.0% -> 87.0%, with 25-35% fewer
 tool calls. As with the first run, accuracy differences are within the noise of 42-50 paper splits; the
 consistent effect of GRPO is shorter episodes.

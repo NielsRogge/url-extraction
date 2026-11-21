@@ -37,6 +37,7 @@ class TraceSettings:
     shards: int = 3
     flavor: str = "cpu-upgrade"
     timeout: str = "12h"
+    baseline_concurrency: int = 4  # concurrent sessions for the teacher's evaluation baseline
 
 
 @dataclass
@@ -98,9 +99,30 @@ class SFTSettings:
 
 @dataclass
 class MergeSettings:
+    """Merging a LoRA into a standalone checkpoint (its own job; bf16 PEFT merges need a GPU)."""
+
     method: str = "peft"  # or module:function(args, adapter_snapshot, token) -> output dir
+    image: str = DEFAULT_TRAIN_IMAGE
+    flavor: str = "a100-large"
+    timeout: str = "2h"
     deps: list[str] = field(default_factory=lambda: ["torchvision", "pillow"])  # added to the script's deps
     replace_deps: bool = False  # True: `deps` is the whole environment (no PEP 723 deps)
+
+
+@dataclass
+class ProbeSettings:
+    """Difficulty probe of the merged SFT policy: K attempts per paper under rollout conditions; papers solved
+    sometimes but not always form the GRPO prompt pool (`difficulty_probe.py`)."""
+
+    flavor: str = ""  # "" = serve.flavor
+    timeout: str = "5h"
+    shards: int = 4
+    sample: int = 300
+    k: int = 4
+    concurrency: int = 8
+    temperature: float = 0.8  # match the GRPO rollouts
+    episode_timeout: float = 180
+    args: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -123,6 +145,7 @@ class Student:
     lora: LoraSettings = field(default_factory=LoraSettings)
     sft: SFTSettings = field(default_factory=SFTSettings)
     merge: MergeSettings = field(default_factory=MergeSettings)
+    probe: ProbeSettings = field(default_factory=ProbeSettings)
     grpo: GRPOSettings = field(default_factory=GRPOSettings)
 
     @property

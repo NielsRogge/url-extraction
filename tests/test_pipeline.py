@@ -54,6 +54,22 @@ def test_kimi_9b_jobs_match_the_old_pipeline_script():
         assert "--public" in job.command
 
 
+def test_probe_feeds_the_grpo_prompt_pool():
+    run, built = jobs(["--teacher", "inkling-2-small", "--student", "inkling-2-mini", "--stages", "probe,grpo"])
+    probes = built["probe"]
+    assert len(probes) == 4 and all(job.flavor == "rtx-pro-6000" for job in probes)
+    assert "--model " + run.sft_merged in probes[0].command and "--shard 0/4" in probes[0].command
+    assert "--temperature 1.0" in probes[0].command and "--episode-timeout 300" in probes[0].command
+    assert "--tag probe-sft/shard-0" in probes[0].command
+    assert "qualified-ids.txt" in built["grpo"][0].command and "--include-ids-file probe-ids.txt" in built["grpo"][0].command
+
+
+def test_teacher_baseline_concurrency():
+    _, built = jobs(["--teacher", "inkling-2-small", "--student", "qwen3.5-4b", "--stages", "eval", "--eval-variants", "teacher"])
+    command = built["eval"][0].command
+    assert "--concurrency 4" in command and '"cost": {"input": 0.3, "output": 1.0}' in command and '"temperature": true' in command
+
+
 def test_extra_splits_and_any_dataset():
     _, built = jobs(["--teacher", "glm-5.2", "--student", "qwen3.5-4b", "--stages", "eval", "--splits", "test,test_hard",
                      "--dataset", "nielsr/paper-url-extraction-v2"])  # fmt: skip
@@ -62,15 +78,19 @@ def test_extra_splits_and_any_dataset():
 
 
 def test_inkling_jobs_use_the_image_vllm_and_hooks():
-    _, built = jobs(["--teacher", "inkling-2-small", "--student", "inkling-2-mini", "--stages", "sft,grpo,eval",
-                     "--eval-variants", "sft"])  # fmt: skip
+    run, built = jobs(["--teacher", "inkling-2-small", "--student", "inkling-2-mini", "--stages", "sft,merge,grpo,eval",
+                       "--eval-variants", "sft"])  # fmt: skip
     evaluation = built["eval"][0]
     assert evaluation.image == "vllm/vllm-openai:inkling-2-mini" and evaluation.flavor == "rtx-pro-6000"
     assert '--vllm-binary "$(command -v vllm)"' in evaluation.command and "--with torch" in evaluation.command
     assert "vllm>=" not in evaluation.command  # the image's vLLM is used, never a PyPI one
     assert "--adapter-converter inkling_adapter:convert_adapter" in evaluation.command
-    assert "--trainer simple" in built["grpo"][0].command
-    assert "--merge-method merge_adapter:merge_inkling" in built["grpo"][0].command
+    train, merge_grpo = built["grpo"]
+    assert "--trainer simple" in train.command and f"--card-base-model {run.sft_merged}" in train.command
+    assert "--exclude-tiers 7" in train.command and train.timeout == "14h" and "--dspark" not in train.command
+    for job in (built["merge"][0], merge_grpo):  # attention merge on CPU, never on the GPU node
+        assert job.flavor == "cpu-xl" and "--merge-method merge_adapter:merge_inkling" in job.command
+    assert "--python-preference only-managed" in evaluation.command and "--max-lora-rank 64" in evaluation.command
     assert "--keep-reasoning" in built["sft"][0].command
 
 

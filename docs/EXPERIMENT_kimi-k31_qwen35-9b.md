@@ -57,7 +57,7 @@ for i in 0 1 2; do uv run generate_opencode_traces.py --split train --start $((i
   --model huggingface/moonshotai/Kimi-K3.1-Pro --output runs/kimi-train-$i.jsonl & done; wait
 # SFT (1x H200), GRPO (2x H200), evaluation: see pipeline.md for the full command with this run's repo names
 uv run pipeline.py --teacher kimi-k3.1-pro --student qwen3.5-9b --grpo-ids scripts/rl-kimi-9b-ids.txt \
-  --traces-repo nielsr/paper-url-opencode-traces-kimi --traces-files train-kimi-k31.jsonl --stages sft,grpo,eval
+  --traces-repo nielsr/paper-url-opencode-traces-kimi --traces-files train-kimi-k31.jsonl --stages sft,merge,grpo,eval
 ```
 
 `scripts/rl-kimi-9b-ids.txt` is the GRPO prompt pool: the 1,134 train papers where Kimi got a URL

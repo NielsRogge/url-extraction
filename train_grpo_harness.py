@@ -790,6 +790,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tool-call-parser", default="qwen3_coder")
     parser.add_argument("--reasoning-parser", default="")
     parser.add_argument("--vllm-extra-args", default="", help="Extra arguments appended to `vllm serve` (shell-quoted)")
+    parser.add_argument("--card-base-model", help="Hub repo id to name as base_model in adapter cards (when --model is a local path)")
     parser.add_argument("--lora-target-modules", default="", help="LoRA target-module regex (default: Qwen3.5 text)")
     return parser.parse_args()
 

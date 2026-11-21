@@ -11,7 +11,9 @@ notes = "1,215 accepted train traces from 1,726 papers (nielsr/inkling-2-mini-ur
 name = "Inkling-2-Small (DeepInfra)"
 tool_call = true
 reasoning = true
+temperature = true
 limit = { context = 131072, output = 16384 }
+cost = { input = 0.30, output = 1.00 }  # USD per 1M tokens; without it OpenCode records $0
 
 [traces]
-concurrency = 6
+concurrency = 6  # distillation; the test baseline uses baseline_concurrency (4)

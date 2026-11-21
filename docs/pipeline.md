@@ -58,7 +58,7 @@ Teacher (`profiles/teachers/<name>.toml`):
 | `opencode_model` | OpenCode `provider/model`; a provider pin is part of the id (`...:deepinfra`) |
 | `provider` | the pinned Inference Provider, for documentation |
 | `[opencode_model_entry]` | inline OpenCode model declaration, needed for ids not in OpenCode's catalog (pinned ids) |
-| `[traces]` | `concurrency`, `attempts_per_row`, `accept_partial`, `episode_timeout`, `max_tool_calls`, `shards`, `flavor`, `timeout` |
+| `[traces]` | `concurrency`, `attempts_per_row`, `accept_partial`, `episode_timeout`, `max_tool_calls`, `shards`, `flavor`, `timeout`, `baseline_concurrency` (teacher evaluation baseline, default 4) |
 
 Student (`profiles/students/<name>.toml`):
 
@@ -68,7 +68,8 @@ Student (`profiles/students/<name>.toml`):
 | `[serve]` | `image`, `vllm` (`pep723`: scripts install vLLM; `image`: use the image's `vllm`), `flavor`, `timeout`, `deps`, `tool_call_parser`, `reasoning_parser`, `enforce_eager`, `language_model_only`, `max_model_len`, `max_output_tokens`, `gpu_memory_utilization`, `vllm_extra_args` |
 | `[lora]` | `rank`, `sft_target_modules` (comma list or regex), `grpo_target_modules`, `adapter_converter` (`module:function(src, dst)` making an adapter servable by vLLM) |
 | `[sft]` | `image`, `flavor`, `timeout`, `deps` (empty: the script's PEP 723 deps), `model_class`, `train_patch` (module with `enable(chunk_size=...)`), `keep_reasoning`, `args` |
-| `[merge]` | `method` (`peft` or `module:function(args, adapter_dir, token)`), `deps`, `replace_deps` |
+| `[merge]` | `method` (`peft` or `module:function(args, adapter_dir, token)`), `image`, `flavor` (default `a100-large`: a bf16 PEFT merge wants a GPU), `timeout`, `deps`, `replace_deps` |
+| `[probe]` | `flavor` (default: `serve.flavor`), `timeout`, `shards`, `sample`, `k`, `concurrency`, `temperature`, `episode_timeout`, `args` |
 | `[grpo]` | `image`, `flavor`, `timeout`, `backend` (`trl` or `simple`), `deps`, `args` (appended after the recipe defaults; the last flag wins) |
 
 Current profiles:
@@ -77,10 +78,15 @@ Current profiles:
 |---|---|
 | `glm-5.2` | `huggingface/zai-org/GLM-5.2`, automatic routing |
 | `kimi-k3.1-pro` | `huggingface/moonshotai/Kimi-K3.1-Pro` (served by Together) |
-| `inkling-2-small` | pinned to DeepInfra (`:deepinfra`, inline model entry), 6 concurrent sessions |
+| `inkling-2-small` | pinned to DeepInfra (`:deepinfra`; inline model entry with `temperature`, limits and `cost`, without which OpenCode records $0), 6 concurrent sessions for distillation, 4 for the test baseline |
 | `qwen3.5-4b` | all defaults: PyPI vLLM, `qwen3_coder`, text-only LoRA r32, H200 SFT/eval, 2x H200 TRL GRPO with 32 rollouts |
 | `qwen3.5-9b` | defaults, 16 concurrent GRPO rollouts |
-| `inkling-2-mini` | `vllm/vllm-openai:inkling-2-mini` image on RTX PRO 6000 (H200 for SFT), `inkling` parsers, attention-only LoRA r64 renamed by `inkling_adapter`, `inkling_train_patch`, reasoning distilled, attention merge, `simple` GRPO backend; needs PR #9's modules |
+| `inkling-2-mini` | `vllm/vllm-openai:inkling-2-mini` image on RTX PRO 6000 (H200 for SFT), `inkling` parsers, attention-only LoRA r64 renamed by `inkling_adapter`, `inkling_train_patch`, reasoning distilled, attention merge on `cpu-xl`, `simple` GRPO backend (8 rollouts, tiers 7 excluded and harder tiers repeated, 14 h for 100 steps at 390-490 s each); needs PR #9's modules |
+
+Inkling-2-Mini notes: vLLM prefill on RTX PRO 6000 is slow (~1-2k tokens/s), so GRPO and the probe use 8
+concurrent rollouts, not 16. Never pass `--dspark`: the bundled drafter has no kernels for RTX PRO 6000.
+Evaluator environments next to the image's vLLM use uv-managed Python (`--python-preference
+only-managed`); the image's system Python lacks `Python.h`, so Triton cannot build against it.
 
 To add a model, copy the closest profile. If it needs code the scripts do not have (an adapter rename, a
 merge for a quantized checkpoint, a training patch), put it in a module, name it in the profile as
@@ -97,7 +103,9 @@ uv run pipeline.py --teacher kimi-k3.1-pro --student qwen3.5-9b --dataset nielsr
 |---|---|---|
 | `traces` | `[traces].shards` CPU jobs, disjoint `--shard i/n` slices of train | `<run>-traces` (`raw/train-<i>.jsonl` + sessions) |
 | `sft` | one job on `sft.flavor`; trains on the accepted records of `--traces-files` | `<run>-lora` |
-| `grpo` | one job on `grpo.flavor`: merge SFT, GRPO (`--launch`), merge GRPO | `<run>-sft-merged`, `<run>-grpo-lora`, `<run>-grpo-merged` |
+| `merge` | one job on `merge.flavor`: SFT adapter into the student | `<run>-sft-merged` |
+| `probe` (opt-in) | `probe.shards` jobs: `difficulty_probe.py` on the merged SFT policy, K attempts per paper under rollout conditions | `<run>-eval/difficulty/probe-sft/shard-<i>/` incl. `qualified-ids.txt` |
+| `grpo` | GRPO from `<run>-sft-merged` (`--launch`) on `grpo.flavor`, then a merge job on `merge.flavor` | `<run>-grpo-lora`, `<run>-grpo-merged` |
 | `eval` | per `--eval-variants` (`base`, `sft`, `grpo`, `teacher`), each over every `--splits` split | `<run>-eval` (`sft/`, `sft-grpo/`, `teacher/`, ... + sessions + summaries) |
 | `publish` | local | models and datasets public, code repo private, everything in the collection |
 
@@ -117,8 +125,10 @@ uv run pipeline.py --teacher kimi-k3.1-pro --student qwen3.5-9b --dataset nielsr
   --gradient-accumulation-steps 2 --max-tool-calls 15`; evaluation 180 s episodes, 15 tool calls,
   concurrency 8. The teacher baseline uses the same limits; teacher *trace generation* keeps its profile's
   20-call limit.
+- GRPO prompt pool: `--grpo-ids FILE`, or `--grpo-ids probe` (the default when the probe stage runs) for
+  the union of the probe's qualified IDs: papers the SFT policy solves sometimes but not always. With the
+  probe, a FILE restricts the probed candidates instead.
 - `--grpo-merge-only` merges an already pushed GRPO adapter (recovery after a failed merge or eval).
-  When `<run>-sft-merged` already exists and `sft` is not among the stages, GRPO starts from it.
 
 ### Reproducing the existing pairs
 
@@ -130,20 +140,21 @@ uv run pipeline.py --teacher glm-5.2 --student qwen3.5-4b --run-name qwen35-4b-u
   --traces-repo nielsr/paper-url-opencode-traces --traces-files train-v2.jsonl \
   --sft-adapter nielsr/qwen35-4b-url-agent-lora-v2 --grpo-adapter nielsr/qwen35-4b-url-agent-grpo-v2-lora \
   --grpo-merged nielsr/qwen35-4b-url-agent-grpo-v2-merged --eval-repo nielsr/qwen35-4b-url-agent-eval-v2 \
-  --grpo-ids scripts/rl-v2-ids.txt --stages sft,grpo,eval
+  --grpo-ids scripts/rl-v2-ids.txt --stages sft,merge,grpo,eval
 
 # Kimi-K3.1-Pro -> Qwen3.5-9B
 uv run pipeline.py --teacher kimi-k3.1-pro --student qwen3.5-9b --run-name qwen35-9b-url-agent-kimi \
   --traces-repo nielsr/paper-url-opencode-traces-kimi --traces-files train-kimi-k31.jsonl \
   --sft-adapter nielsr/qwen35-9b-url-agent-lora-kimi --grpo-adapter nielsr/qwen35-9b-url-agent-grpo-lora-kimi \
   --grpo-merged nielsr/qwen35-9b-url-agent-grpo-merged-kimi --eval-repo nielsr/qwen35-9b-url-agent-eval \
-  --grpo-ids scripts/rl-kimi-9b-ids.txt --stages sft,grpo,eval
+  --grpo-ids scripts/rl-kimi-9b-ids.txt --stages sft,merge,grpo,eval
 
 # Inkling-2-Small -> Inkling-2-Mini (once PR #9's modules are merged)
 uv run pipeline.py --teacher inkling-2-small --student inkling-2-mini --run-name inkling-2-mini-url-agent \
   --dataset nielsr/paper-url-extraction-v1-validated \
   --traces-repo nielsr/inkling-2-mini-url-agent-traces --traces-files train-inkling.jsonl \
   --grpo-ids scripts/rl-inkling-qualified-ids.txt --stages grpo,eval
+# or let the pipeline select the pool: --grpo-ids scripts/rl-inkling-ids.txt --stages probe,grpo,eval
 ```
 
 `scripts/serve_space.py --model <merged repo>` deploys the demo Space (it bundles `harness/`).

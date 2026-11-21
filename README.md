@@ -61,7 +61,7 @@ agents' reasoning and tool calls side by side. Source in [`space/`](space/).
 
 Teachers and students are pluggable: each model is a small profile in [`profiles/`](profiles/) (provider
 pin, vLLM image and parsers, GPU flavors, LoRA targets, GRPO backend, ...), and one entry point runs
-traces -> SFT -> GRPO -> eval -> Hub publishing as HF Jobs:
+traces -> SFT -> merge -> (difficulty probe) -> GRPO -> eval -> Hub publishing as HF Jobs:
 
 ```bash
 uv run pipeline.py --teacher kimi-k3.1-pro --student qwen3.5-9b --dataset nielsr/paper-url-extraction-v1

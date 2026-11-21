@@ -45,7 +45,9 @@ sys.path.insert(0, str(ROOT))
 
 from harness.profiles import Student, Teacher, load_student, load_teacher  # noqa: E402
 
-STAGES = ("traces", "sft", "grpo", "eval", "publish")
+STAGES = ("traces", "sft", "merge", "probe", "grpo", "eval", "publish")
+DEFAULT_STAGES = ("traces", "sft", "merge", "grpo", "eval", "publish")  # probe is opt-in
+PROBE_TAG = "probe-sft"
 JOB_NAMESPACE = "huggingface"  # AGENTS.md: bill Jobs and Inference Providers to the huggingface org
 COLLECTION = "nielsr/paper-url-agent-frontier-to-small-distillation-6b01c8378db0ff55d524014e"
 UV_IMAGE = "ghcr.io/astral-sh/uv:python3.12-bookworm"
@@ -277,17 +279,54 @@ def sft_job(run: Run, rev: str, args: argparse.Namespace) -> Job:
     return Job("sft", f"{run.name}-sft", sft.image, sft.flavor, sft.timeout, command, {})
 
 
-def grpo_job(run: Run, rev: str, args: argparse.Namespace) -> Job:
+def merge_job(run: Run, rev: str, args: argparse.Namespace) -> Job:
+    """Merge the SFT adapter into the student and publish <run>-sft-merged (GRPO and the probe start from it)."""
+    student = run.student
+    merge = merger(
+        student,
+        ["--base-model", q(student.model), "--adapter", q(run.sft_adapter), "--card-base-model", q(student.model),
+         "--card-adapter", q(run.sft_adapter), "--hub-model-id", q(run.sft_merged), "--public", "--output", "/model"],
+    )  # fmt: skip
+    command = "\n".join([prelude(run, rev), merge, "echo MERGE_DONE"])
+    return Job("merge", f"{run.name}-merge-sft", student.merge.image, student.merge.flavor, student.merge.timeout, command, {})
+
+
+def probe_jobs(run: Run, rev: str, args: argparse.Namespace) -> list[Job]:
+    """Difficulty probe of the merged SFT policy, sharded; qualified IDs land in <run>-eval/difficulty/."""
+    student = run.student
+    probe = student.probe
+    deps = [dep for dep in script_dependencies("evaluate_vllm.py") if not dep.startswith("vllm")] + student.serve.deps
+    jobs = []
+    for index in range(probe.shards):
+        flags = [
+            "--model", q(run.sft_merged), "--dataset", q(run.dataset), "--sample", str(probe.sample),
+            "--shard", f"{index}/{probe.shards}", "--k", str(probe.k), "--concurrency", str(probe.concurrency),
+            "--temperature", str(probe.temperature), "--episode-timeout", str(probe.episode_timeout),
+            "--max-tool-calls", str(EVAL_RECIPE["max_tool_calls"]), "--max-model-len", str(student.serve.max_model_len),
+            "--max-output-tokens", str(student.serve.max_output_tokens), *serve_flags(student, grpo=True),
+            "--output-dir", "/probe", "--output-repo", q(run.eval_repo), "--tag", f"{PROBE_TAG}/shard-{index}",
+        ]  # fmt: skip
+        if student.serve.vllm_extra_args:
+            flags.append(f"--vllm-extra-args={q(student.serve.vllm_extra_args)}")
+        if args.grpo_ids and args.grpo_ids != "probe":  # probe a candidate pool instead of the whole split
+            flags += ["--include-ids-file", Path(args.grpo_ids).name]
+        flags += probe.args
+        command = "\n".join(
+            [prelude(run, rev, image_vllm=student.serve.vllm == "image"), python("difficulty_probe.py", flags, deps=deps),
+             "echo PROBE_DONE"]  # fmt: skip
+        )
+        jobs.append(
+            Job("probe", f"{run.name}-probe-{index}", student.serve.image, probe.flavor or student.serve.flavor,
+                probe.timeout, command, {})  # fmt: skip
+        )
+    return jobs
+
+
+def grpo_jobs(run: Run, rev: str, args: argparse.Namespace) -> list[list[Job]]:
+    """GRPO from <run>-sft-merged (one wave), then merging the GRPO adapter (a second wave)."""
     student = run.student
     grpo = student.grpo
-    if args.reuse_sft_merged:  # already published (e.g. a rerun): start from it instead of merging again
-        merge_sft = f"{HF_CLI} download {q(run.sft_merged)} --local-dir /model >/dev/null"
-    else:
-        merge_sft = merger(
-            student,
-            ["--base-model", q(student.model), "--adapter", q(run.sft_adapter), "--card-base-model", q(student.model),
-             "--card-adapter", q(run.sft_adapter), "--hub-model-id", q(run.sft_merged), "--public", "--output", "/model"],
-        )  # fmt: skip
+    fetch_model = f"{HF_CLI} download {q(run.sft_merged)} --local-dir /model >/dev/null"
     train = [
         "--launch", "--model", "/model", "--dataset", q(run.dataset), "--output-dir", "/grpo-run",
         "--hub-model-id", q(run.grpo_adapter), "--public", "--lora-r", str(student.lora.rank),
@@ -296,29 +335,47 @@ def grpo_job(run: Run, rev: str, args: argparse.Namespace) -> Job:
         "--max-tool-calls", str(EVAL_RECIPE["max_tool_calls"]), "--trainer", grpo.backend,
         *serve_flags(student, grpo=True), *GRPO_RECIPE,
     ]  # fmt: skip
+    if grpo.backend == "simple":  # it writes its own adapter cards; /model is not a valid Hub base_model
+        train += ["--card-base-model", q(run.sft_merged)]
     if student.lora.grpo_target_modules:
         train += ["--lora-target-modules", q(student.lora.grpo_target_modules)]
-    if args.grpo_ids:
-        train += ["--include-ids-file", Path(args.grpo_ids).name]
+    ids = grpo_ids_steps(run, args)
+    if ids:
+        train += ["--include-ids-file", ids[-1]]
     train += grpo.args
-    # --grpo-merge-only: recovery when training pushed the adapter but a later step failed (no retraining).
-    adapter = q(run.grpo_adapter) if args.grpo_merge_only else "/grpo-run"
-    merge_grpo = merger(
+    waves: list[list[Job]] = []
+    if not args.grpo_merge_only:
+        command = "\n".join(
+            [prelude(run, rev, image_vllm=student.serve.vllm == "image"), fetch_model, *ids[:-1],
+             python("train_grpo_harness.py", train, deps=grpo.deps or None), "echo GRPO_DONE"]  # fmt: skip
+        )
+        waves.append([Job("grpo", f"{run.name}-grpo", grpo.image, grpo.flavor, grpo.timeout, command, {})])
+    # The adapter was trained on /model, so the merge runs against the same local copy of <run>-sft-merged.
+    merge = merger(
         student,
-        ["--base-model", "/model", "--adapter", adapter, "--card-base-model", q(student.model),
+        ["--base-model", "/model", "--adapter", q(run.grpo_adapter), "--card-base-model", q(student.model),
          "--card-adapter", q(run.grpo_adapter), "--hub-model-id", q(run.grpo_merged), "--public",
          "--output", "/grpo-merged"],
     )  # fmt: skip
-    command = "\n".join(
-        [
-            prelude(run, rev, image_vllm=student.serve.vllm == "image"),
-            merge_sft,
-            *([] if args.grpo_merge_only else [python("train_grpo_harness.py", train, deps=grpo.deps or None)]),
-            merge_grpo,
-            "echo GRPO_DONE",
-        ]
-    )
-    return Job("grpo", f"{run.name}-grpo", grpo.image, grpo.flavor, grpo.timeout, command, {})
+    command = "\n".join([prelude(run, rev), fetch_model, merge, "echo MERGE_DONE"])
+    waves.append([Job("grpo", f"{run.name}-merge-grpo", student.merge.image, student.merge.flavor,
+                      student.merge.timeout, command, {})])  # fmt: skip
+    return waves
+
+
+def grpo_ids_steps(run: Run, args: argparse.Namespace) -> list[str]:
+    """Shell steps producing the GRPO prompt pool; the last element is the file name passed to the trainer."""
+    if not args.grpo_ids:
+        return []
+    if args.grpo_ids != "probe":
+        return [Path(args.grpo_ids).name]
+    return [
+        f"{HF_CLI} download {q(run.eval_repo)} --repo-type dataset --include 'difficulty/{PROBE_TAG}/shard-*/qualified-ids.txt' "
+        "--local-dir /work/probe >/dev/null",
+        f"cat /work/probe/difficulty/{PROBE_TAG}/shard-*/qualified-ids.txt | sort -u > /work/probe-ids.txt",
+        "wc -l /work/probe-ids.txt",
+        "probe-ids.txt",
+    ]
 
 
 def eval_jobs(run: Run, rev: str, args: argparse.Namespace) -> list[Job]:
@@ -364,7 +421,8 @@ def teacher_eval_job(run: Run, rev: str, splits: list[str], args: argparse.Names
     for split in splits:
         generate = [
             "--dataset", q(run.dataset), "--split", split, "--limit", str(args.eval_limit), "--attempts-per-row", "1",
-            "--concurrency", str(EVAL_RECIPE["concurrency"]), "--episode-timeout", str(EVAL_RECIPE["episode_timeout"]),
+            "--concurrency", str(teacher.traces.baseline_concurrency),
+            "--episode-timeout", str(EVAL_RECIPE["episode_timeout"]),
             "--max-tool-calls", str(EVAL_RECIPE["max_tool_calls"]), "--model", q(teacher.opencode_model),
             "--hf-bill-to", JOB_NAMESPACE, "--evaluation-label", "teacher", "--no-resume",
             "--output", f"/eval/teacher/{split}.jsonl", "--output-repo", q(run.eval_repo),
@@ -394,7 +452,7 @@ def staged_paths(run: Run, args: argparse.Namespace) -> list[Path]:
     for package in STAGED_PACKAGES:
         paths += sorted(p for p in (ROOT / package).rglob("*") if p.is_file() and "__pycache__" not in p.parts)
     paths += [ROOT / name for name in run.student.requires if args.dry_run is False or (ROOT / name).exists()]
-    if args.grpo_ids:
+    if args.grpo_ids and args.grpo_ids != "probe":
         paths.append(Path(args.grpo_ids).resolve())
     return paths
 
@@ -503,20 +561,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--teacher", required=True, help="Teacher profile (profiles/teachers/*.toml)")
     parser.add_argument("--student", required=True, help="Student profile (profiles/students/*.toml)")
     parser.add_argument("--dataset", default="nielsr/paper-url-extraction-v1", help="Any dataset with the same schema")
-    parser.add_argument("--stages", default=",".join(STAGES), help=f"Comma-separated subset of {','.join(STAGES)}")
+    parser.add_argument("--stages", default=",".join(DEFAULT_STAGES), help=f"Comma-separated subset of {','.join(STAGES)}")
     parser.add_argument("--splits", default="test,validation", help="Evaluation splits, e.g. test,validation,test_hard")
     parser.add_argument("--eval-variants", default="sft,grpo,teacher", help="Comma list of base,sft,grpo,teacher")
     parser.add_argument("--eval-limit", type=int, default=50, help="Scoreable papers per split")
     parser.add_argument("--trace-shards", type=int, default=0, help="Parallel trace jobs (default: teacher profile)")
     parser.add_argument("--traces-files", default="raw/train-*.jsonl", help="Trace files in --traces-repo for SFT")
-    parser.add_argument("--grpo-ids", help="GRPO prompt pool: arXiv IDs file (e.g. scripts/rl-kimi-9b-ids.txt)")
+    parser.add_argument(
+        "--grpo-ids",
+        help="GRPO prompt pool: an arXiv IDs file (e.g. scripts/rl-kimi-9b-ids.txt), or 'probe' for the qualified IDs "
+        "of the probe stage (the default when probe runs); with probe, a file restricts the probed candidates",
+    )
     parser.add_argument("--namespace", default="nielsr", help="Owner of the published repos")
     parser.add_argument("--run-name", help="Artifact name prefix (default: <student>-url-agent-<teacher>)")
     for name in ("traces-repo", "sft-adapter", "sft-merged", "grpo-adapter", "grpo-merged", "eval-repo", "code-repo"):
         parser.add_argument(f"--{name}", help=f"Override the {name.replace('-', ' ')} repo id")
     parser.add_argument("--grpo-merge-only", action="store_true", help="GRPO stage: merge the pushed adapter, no training")
-    parser.add_argument("--reuse-sft-merged", action="store_true",
-                        help="GRPO stage: start from the published SFT merge (automatic when it exists)")  # fmt: skip
     parser.add_argument("--rev", help="Reuse already staged code (code/<rev>/ in the code repo)")
     parser.add_argument("--wait", action="store_true", help="Wait for the jobs of a single stage")
     parser.add_argument("--dry-run", action="store_true", help="Print the jobs; stage and launch nothing")
@@ -526,19 +586,30 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     if unknown:
         parser.error(f"unknown stages {sorted(unknown)}")
     args.stages = [stage for stage in STAGES if stage in args.stages]
+    if "probe" in args.stages and not args.grpo_ids:
+        args.grpo_ids = "probe"
     return args
 
 
-def build_jobs(stage: str, run: Run, rev: str, args: argparse.Namespace) -> list[Job]:
+def build_waves(stage: str, run: Run, rev: str, args: argparse.Namespace) -> list[list[Job]]:
+    """A stage's jobs as waves: jobs in a wave run in parallel, a wave starts when the previous one completed."""
     if stage == "traces":
-        return trace_jobs(run, rev, args)
+        return [trace_jobs(run, rev, args)]
     if stage == "sft":
-        return [sft_job(run, rev, args)]
+        return [[sft_job(run, rev, args)]]
+    if stage == "merge":
+        return [[merge_job(run, rev, args)]]
+    if stage == "probe":
+        return [probe_jobs(run, rev, args)]
     if stage == "grpo":
-        return [grpo_job(run, rev, args)]
+        return grpo_jobs(run, rev, args)
     if stage == "eval":
-        return eval_jobs(run, rev, args)
+        return [eval_jobs(run, rev, args)]
     raise ValueError(stage)
+
+
+def build_jobs(stage: str, run: Run, rev: str, args: argparse.Namespace) -> list[Job]:
+    return [job for wave in build_waves(stage, run, rev, args) for job in wave]
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -552,22 +623,17 @@ def main(argv: list[str] | None = None) -> None:
         print(f"warning: {message}; a real run would stop here", flush=True)
     print(f"run {run.name}: {run.teacher.name} ({run.teacher.opencode_model}) -> {run.student.name} ({run.student.model}) "
           f"on {run.dataset}; stages {','.join(args.stages)}", flush=True)  # fmt: skip
-    if "grpo" in args.stages and not args.reuse_sft_merged and "sft" not in args.stages:
-        from huggingface_hub import HfApi
-
-        try:
-            args.reuse_sft_merged = HfApi().repo_exists(run.sft_merged)
-        except Exception:  # noqa: BLE001 - offline dry runs merge again
-            pass
     rev = args.rev
     for stage in args.stages:
         if stage == "publish":
             publish(run, args)
             continue
         rev = rev or stage_code(run, args)
-        ids = launch(build_jobs(stage, run, rev, args), args)
-        if len(args.stages) > 1 or args.wait:
-            wait(ids)
+        waves = build_waves(stage, run, rev, args)
+        for number, wave in enumerate(waves, 1):
+            ids = launch(wave, args)
+            if number < len(waves) or len(args.stages) > 1 or args.wait:
+                wait(ids)
 
 
 if __name__ == "__main__":
