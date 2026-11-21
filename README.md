@@ -48,6 +48,9 @@ Takeaways:
   are only in the PDF or on the project page, are being mined to make evaluation and the RL signal more
   informative ([docs/data.md](docs/data.md)).
 
+All models, datasets, traces, evaluations and the demo Space are grouped in the
+[Hub collection](https://huggingface.co/collections/nielsr/paper-url-agent-frontier-to-small-distillation-6b01c8378db0ff55d524014e).
+
 ## Try it
 
 [`nielsr/url-agent-race`](https://huggingface.co/spaces/nielsr/url-agent-race) runs the GRPO-trained
