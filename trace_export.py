@@ -50,6 +50,7 @@ HARNESS = "opencode"
 MAX_TOOL_OUTPUT_CHARS = 60_000
 TOKEN_RE = re.compile(r"\bhf_[A-Za-z0-9]{20,}\b")
 SESSIONS_DIR = "sessions"
+COLLECTION_URL = "https://huggingface.co/collections/nielsr/paper-url-agent-frontier-to-small-distillation-6b01c8378db0ff55d524014e"
 
 
 def _redact(text: str) -> str:
@@ -284,7 +285,7 @@ def ensure_card(api: Any, repo_id: str, episode_files: list[str]) -> None:
         card = DatasetCard.load(repo_id, repo_type="dataset", token=api.token)
     except (EntryNotFoundError, RepositoryNotFoundError, OSError):
         card = DatasetCard(f"---\ntags: []\n---\n\n# {repo_id.split('/')[-1]}\n\nOpenCode URL-extraction agent episodes. "
-                           "See https://github.com/NielsRogge/url-extraction.\n")
+                           f"Part of the [paper URL agent collection]({COLLECTION_URL}).\n")
     data = card.data.to_dict()
     tags = list(dict.fromkeys([*(data.get("tags") or []), "agent-traces", "opencode"]))
     configs = [c for c in (data.get("configs") or []) if c.get("config_name") not in {"sessions", "episodes"}]
