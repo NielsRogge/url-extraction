@@ -1,0 +1,86 @@
+import pytest
+
+import pipeline
+from harness.profiles import available_profiles, load_student, load_teacher
+
+
+def test_all_profiles_load():
+    assert available_profiles("teachers") == ["glm-5.2", "inkling-2-small", "kimi-k3.1-pro"]
+    assert available_profiles("students") == ["inkling-2-mini", "qwen3.5-4b", "qwen3.5-9b"]
+    for name in available_profiles("teachers"):
+        assert load_teacher(name).opencode_model.startswith("huggingface/")
+    for name in available_profiles("students"):
+        assert load_student(name).model
+
+
+def test_inkling_profiles_carry_the_pr9_settings():
+    teacher = load_teacher("inkling-2-small")
+    assert teacher.opencode_model.endswith(":deepinfra") and teacher.provider == "deepinfra"
+    student = load_student("inkling-2-mini")
+    assert (student.serve.flavor, student.sft.flavor, student.grpo.flavor) == ("rtx-pro-6000", "h200", "rtx-pro-6000x2")
+    assert student.serve.tool_call_parser == student.serve.reasoning_parser == "inkling"
+    assert student.grpo.backend == "simple" and student.lora.adapter_converter == "inkling_adapter:convert_adapter"
+    assert student.sft.keep_reasoning and student.lora.rank == 64
+
+
+def test_unknown_profile_keys_are_rejected(tmp_path):
+    path = tmp_path / "bad.toml"
+    path.write_text('name = "x"\nmodel = "y"\n[serve]\ntool_parser = "typo"\n')
+    with pytest.raises(ValueError, match="tool_parser"):
+        load_student(str(path))
+
+
+def jobs(argv):
+    args = pipeline.parse_args(argv)
+    run = pipeline.make_run(args)
+    return run, {stage: pipeline.build_jobs(stage, run, "REV", args) for stage in args.stages if stage != "publish"}
+
+
+def test_kimi_9b_jobs_match_the_old_pipeline_script():
+    run, built = jobs(["--teacher", "kimi-k3.1-pro", "--student", "qwen3.5-9b", "--grpo-ids", "scripts/rl-kimi-9b-ids.txt",
+                       "--sft-adapter", "nielsr/qwen35-9b-url-agent-lora-kimi"])  # fmt: skip
+    assert run.sft_adapter == "nielsr/qwen35-9b-url-agent-lora-kimi"
+    assert [job.flavor for job in built["traces"]] == ["cpu-upgrade"] * 3
+    sft = built["sft"][0]
+    assert sft.flavor == "h200" and "uv run train_sft.py" in sft.command and "--full-trajectory" in sft.command
+    grpo = built["grpo"][0]
+    assert grpo.flavor == "h200x2" and "--include-ids-file rl-kimi-9b-ids.txt" in grpo.command
+    assert "--max-concurrent-rollouts 16" in grpo.command and "--trainer trl" in grpo.command
+    tags = {job.name.rsplit("-", 1)[-1]: job for job in built["eval"]}
+    assert set(tags) == {"sft", "grpo", "teacher"}
+    assert "--tag sft/" in tags["sft"].command and "--tag sft-grpo/" in tags["grpo"].command
+    assert "--evaluation-label teacher" in tags["teacher"].command
+    for job in [*built["traces"], *built["eval"]]:
+        assert "--public" in job.command
+
+
+def test_extra_splits_and_any_dataset():
+    _, built = jobs(["--teacher", "glm-5.2", "--student", "qwen3.5-4b", "--stages", "eval", "--splits", "test,test_hard",
+                     "--dataset", "nielsr/paper-url-extraction-v2"])  # fmt: skip
+    for job in built["eval"]:
+        assert "--split test_hard" in job.command and "--dataset nielsr/paper-url-extraction-v2" in job.command
+
+
+def test_inkling_jobs_use_the_image_vllm_and_hooks():
+    _, built = jobs(["--teacher", "inkling-2-small", "--student", "inkling-2-mini", "--stages", "sft,grpo,eval",
+                     "--eval-variants", "sft"])  # fmt: skip
+    evaluation = built["eval"][0]
+    assert evaluation.image == "vllm/vllm-openai:inkling-2-mini" and evaluation.flavor == "rtx-pro-6000"
+    assert '--vllm-binary "$(command -v vllm)"' in evaluation.command and "--with torch" in evaluation.command
+    assert "vllm>=" not in evaluation.command  # the image's vLLM is used, never a PyPI one
+    assert "--adapter-converter inkling_adapter:convert_adapter" in evaluation.command
+    assert "--trainer simple" in built["grpo"][0].command
+    assert "--merge-method merge_adapter:merge_inkling" in built["grpo"][0].command
+    assert "--keep-reasoning" in built["sft"][0].command
+
+
+def test_staging_includes_the_harness_package():
+    args = pipeline.parse_args(["--teacher", "glm-5.2", "--student", "qwen3.5-4b"])
+    staged = {str(path.relative_to(pipeline.ROOT)) for path in pipeline.staged_paths(pipeline.make_run(args), args)}
+    assert {"harness/__init__.py", "harness/scoring.py", "harness/opencode.py", "harness/task.py",
+            "harness/system_prompt.txt", "trace_export.py", "evaluate_vllm.py"} <= staged  # fmt: skip
+
+
+def test_pep723_dependencies_are_parsed():
+    deps = pipeline.script_dependencies("evaluate_vllm.py")
+    assert any(dep.startswith("opencode-ai") for dep in deps) and any(dep.startswith("vllm") for dep in deps)

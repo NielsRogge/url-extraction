@@ -1,0 +1,4 @@
+# Qwen3.5-4B: every setting is the profile default (vLLM from PyPI, qwen3_coder tool parser, text-only LoRA
+# on H200 / 2x H200 with TRL's HarnessAsyncGRPOTrainer).
+name = "qwen3.5-4b"
+model = "Qwen/Qwen3.5-4B"

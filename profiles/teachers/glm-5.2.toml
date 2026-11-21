@@ -1,0 +1,5 @@
+# GLM-5.2 through HF Inference Providers (automatic routing). Teacher of the Qwen3.5-4B student.
+name = "glm-5.2"
+model = "zai-org/GLM-5.2"
+opencode_model = "huggingface/zai-org/GLM-5.2"
+notes = "~$0.03 per paper; 873 accepted train traces (nielsr/paper-url-opencode-traces)"

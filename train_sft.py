@@ -10,7 +10,12 @@
 #   "trl==1.9.2",
 # ]
 # ///
-"""QLoRA SFT for Qwen3.5 from verified OpenCode trajectories."""
+"""LoRA SFT of a student on verified OpenCode teacher trajectories.
+
+Defaults fit Qwen3.5; other students pass their profile's settings (`pipeline.py` does this): LoRA target
+modules, the model class to load, an optional training-time patch module, and whether the teacher's
+reasoning (`reasoning_content`) is distilled.
+"""
 
 from __future__ import annotations
 
@@ -138,10 +143,16 @@ def terminal_trajectory(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return result
 
 
+# Set from --keep-reasoning: distil the teacher's reasoning (rendered as thinking blocks by the chat template).
+KEEP_REASONING = False
+
+
 def normalized_messages(record: dict[str, Any]) -> list[dict[str, Any]]:
     messages = []
     for raw_message in terminal_trajectory(record["trajectory"]):
         message = copy.deepcopy(raw_message)
+        if not KEEP_REASONING:
+            message.pop("reasoning_content", None)
         if message.get("role") == "tool" and len(message.get("content", "")) > MAX_TOOL_CONTENT_CHARS:
             content = message["content"]
             message["content"] = content[:6_000] + "\n[tool output compacted for SFT]\n" + content[-2_000:]
@@ -202,6 +213,8 @@ def render_examples(records: list[dict[str, Any]], tokenizer: Any, max_length: i
         history: list[dict[str, Any]] = []
         for raw_message in terminal_trajectory(record["trajectory"]):
             message = copy.deepcopy(raw_message)
+            if not KEEP_REASONING:
+                message.pop("reasoning_content", None)
             if message.get("role") == "tool" and len(message.get("content", "")) > MAX_TOOL_CONTENT_CHARS:
                 content = message["content"]
                 message["content"] = content[:6_000] + "\n[tool output compacted for SFT]\n" + content[-2_000:]
@@ -263,7 +276,34 @@ def tokenize_examples(dataset: Dataset, tokenizer: Any, max_length: int) -> Data
     return Dataset.from_list(rows)
 
 
+def lora_target_modules(value: str) -> Any:
+    """Comma-separated module names, or a regex (anything with regex metacharacters); default: Qwen3.5 text."""
+    if not value:
+        return TEXT_LORA_TARGET_MODULES
+    if any(char in value for char in "\\()[]|*+?^$"):
+        return value
+    return [name.strip() for name in value.split(",") if name.strip()]
+
+
+def load_model(args: argparse.Namespace) -> Any:
+    """Load the student with a profile-named model class (e.g. models SFTTrainer cannot instantiate itself)."""
+    import transformers
+
+    if args.train_patch:
+        from harness.hooks import resolve
+
+        resolve(args.train_patch).enable(chunk_size=args.attention_chunk_size)
+    model_class = getattr(transformers, args.model_class)
+    model = model_class.from_pretrained(args.model, dtype=torch.bfloat16 if not args.fp16 else torch.float16)
+    for config in (model.config, getattr(model.config, "text_config", None)):
+        if config is not None:
+            config.use_cache = False
+    return model
+
+
 def main(args: argparse.Namespace) -> None:
+    global KEEP_REASONING
+    KEEP_REASONING = args.keep_reasoning
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
     tokenizer.pad_token = tokenizer.pad_token or tokenizer.eos_token
     render = render_trajectory_examples if args.full_trajectory else render_examples
@@ -279,8 +319,17 @@ def main(args: argparse.Namespace) -> None:
             bnb_4bit_compute_dtype=torch.bfloat16,
             bnb_4bit_use_double_quant=True,
         )
+    model: Any = args.model
+    model_init_kwargs: dict[str, Any] | None = {
+        "torch_dtype": torch.bfloat16 if not args.fp16 else torch.float16,
+        "trust_remote_code": True,
+    }
+    if args.model_class:
+        if quantization is not None:
+            raise ValueError("--model-class loads full-precision weights; pass --no-4bit")
+        model, model_init_kwargs = load_model(args), None
     trainer = SFTTrainer(
-        model=args.model,
+        model=model,
         processing_class=tokenizer,
         train_dataset=train_dataset,
         peft_config=LoraConfig(
@@ -292,7 +341,7 @@ def main(args: argparse.Namespace) -> None:
             # Qwen3.5ForConditionalGeneration also contains an unused vision
             # tower. Explicit text-module names keep the adapter compatible
             # with text-only vLLM and avoid storing inert visual LoRA tensors.
-            target_modules=TEXT_LORA_TARGET_MODULES,
+            target_modules=lora_target_modules(args.lora_target_modules),
         ),
         quantization_config=quantization,
         args=SFTConfig(
@@ -312,11 +361,11 @@ def main(args: argparse.Namespace) -> None:
             report_to="none",
             push_to_hub=bool(args.hub_model_id),
             hub_model_id=args.hub_model_id,
-            hub_private_repo=bool(args.hub_model_id),
-            model_init_kwargs={
-                "torch_dtype": torch.bfloat16 if not args.fp16 else torch.float16,
-                "trust_remote_code": True,
-            },
+            hub_private_repo=bool(args.hub_model_id) and not args.public,
+            hub_strategy="checkpoint" if args.hub_model_id else "every_save",
+            save_total_limit=args.save_total_limit,
+            gradient_checkpointing_kwargs={"use_reentrant": False},
+            model_init_kwargs=model_init_kwargs,
         ),
     )
     trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
@@ -350,6 +399,14 @@ def parse_args() -> argparse.Namespace:
         help="One example per trajectory with every assistant turn supervised (much less compute)",
     )
     parser.add_argument("--fp16", action="store_true")
+    parser.add_argument("--public", action="store_true", help="Create the Hub repo as public")
+    parser.add_argument("--save-total-limit", type=int, default=None)
+    # Student-profile settings (see profiles/students/*.toml).
+    parser.add_argument("--lora-target-modules", default="", help="Comma list or regex; default: Qwen3.5 text modules")
+    parser.add_argument("--model-class", default="", help="transformers class to load the student with, e.g. AutoModelForMultimodalLM")
+    parser.add_argument("--train-patch", default="", help="module whose enable(chunk_size=...) patches training attention")
+    parser.add_argument("--attention-chunk-size", type=int, default=1024, help="Query chunk for --train-patch")
+    parser.add_argument("--keep-reasoning", action="store_true", help="Distil the teacher's reasoning_content")
     return parser.parse_args()
 
 

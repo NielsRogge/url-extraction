@@ -11,7 +11,12 @@
 #   "pillow",
 # ]
 # ///
-"""Merge the URL-agent LoRA into Qwen3.5 and publish a standalone HF model."""
+"""Merge a URL-agent LoRA into its base model and publish a standalone HF model.
+
+The default method merges with PEFT (Qwen3.5). A student profile can name another `--merge-method`
+(`module:function(args, adapter_snapshot, token) -> output_dir`), e.g. a merge straight into a quantized
+checkpoint's BF16 attention tensors.
+"""
 
 from __future__ import annotations
 
@@ -70,13 +75,12 @@ def verify_adapter_base(snapshot: Path, requested_base: str) -> None:
 
 
 def model_card(base_model: str, adapter: str) -> str:
-    title = base_model.split("/")[-1] if "/" in base_model else "Qwen3.5"
+    title = base_model.split("/")[-1]
     return f"""---
 base_model: {base_model}
 library_name: transformers
 pipeline_tag: text-generation
 tags:
-- qwen3.5
 - peft
 - merged
 ---
@@ -100,6 +104,19 @@ def merge(args: argparse.Namespace) -> Path:
     adapter_snapshot = (
         Path(args.adapter) if Path(args.adapter).is_dir() else Path(snapshot_download(args.adapter, token=token))
     )
+    card_base = args.card_base_model or args.base_model
+    if args.hub_model_id and Path(card_base).exists():
+        raise ValueError("--card-base-model is required to publish a merge of a local --base-model")
+    if args.merge_method != "peft":
+        import sys
+
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from harness.hooks import resolve
+
+        output = Path(resolve(args.merge_method)(args, adapter_snapshot, token))
+        if not (output / "README.md").exists():
+            (output / "README.md").write_text(model_card(card_base, args.card_adapter or args.adapter))
+        return publish_merged(args, output, token)
     verify_adapter_base(adapter_snapshot, args.base_model)
     audit = audit_visual_lora(adapter_snapshot)
     print(f"Adapter audit: {json.dumps(audit, sort_keys=True)}", flush=True)
@@ -123,9 +140,11 @@ def merge(args: argparse.Namespace) -> Path:
     # base model repository.
     AutoProcessor.from_pretrained(args.base_model).save_pretrained(output)
     # The Hub only accepts repo ids as `base_model`; a local merge base (e.g. /model) gets the card's override.
-    card_base = args.card_base_model or (args.base_model if not Path(args.base_model).exists() else "Qwen/Qwen3.5-4B")
     (output / "README.md").write_text(model_card(card_base, args.card_adapter or args.adapter))
+    return publish_merged(args, output, token)
 
+
+def publish_merged(args: argparse.Namespace, output: Path, token: str) -> Path:
     if not args.hub_model_id:
         print(f"Saved merged checkpoint to {output}; skipping Hub upload", flush=True)
         return output
@@ -151,6 +170,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-shard-size", default="4GB")
     parser.add_argument("--card-base-model", help="Repo id to list as base_model in the model card")
     parser.add_argument("--card-adapter", help="Repo id to link as the adapter in the model card")
+    parser.add_argument("--merge-method", default="peft", help="'peft' or module:function from the student profile")
     parser.add_argument("--public", dest="private", action="store_false")
     parser.set_defaults(private=True)
     return parser.parse_args()

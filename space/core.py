@@ -18,6 +18,7 @@ import re
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -33,19 +34,12 @@ from starlette.requests import Request
 from starlette.responses import Response, StreamingResponse
 from starlette.routing import Route
 
-from evaluate_vllm import (
-    ALLOWED_TOOLS,
-    OPENCODE_TOOLS,
-    SCOREABLE_QUALITIES,
-    SYSTEM_PROMPT,
-    PaperCandidate,
-    URLFindings,
-    canonical_url,
-    findings_from_messages,
-    install_opencode,
-    raw_json,
-    user_prompt,
-)
+# The Space bundles harness/ next to this file (scripts/serve_space.py); in a checkout it is one level up.
+sys.path.append(str(Path(__file__).resolve().parent.parent))
+
+from harness.opencode import ALLOWED_TOOLS, OPENCODE_TOOLS, findings_from_messages, install_opencode, raw_json  # noqa: E402
+from harness.scoring import SCOREABLE_QUALITIES, canonical_url  # noqa: E402
+from harness.task import SYSTEM_PROMPT, PaperCandidate, URLFindings, user_prompt  # noqa: E402
 
 # --------------------------------------------------------------------------------------------------
 # Configuration (Space secrets/variables). Credentials are removed from os.environ immediately so
