@@ -234,7 +234,7 @@ def live(client: httpx.Client, url: str) -> tuple[bool, str | None]:
         response = client.get(url, follow_redirects=True)
         final = canonical_url(str(response.url))
         return response.status_code < 400, final if final != canonical_url(url) else None
-    except httpx.HTTPError:
+    except (httpx.HTTPError, httpx.InvalidURL, ValueError):  # malformed URLs from PDF text
         return False, None
 
 
@@ -268,7 +268,7 @@ def label_paper(paper: dict[str, Any], arxiv: Arxiv, web: httpx.Client, llm: htt
         for page_url in project_pages:
             try:
                 html = web.get(page_url, follow_redirects=True).text[:2_000_000]
-            except httpx.HTTPError:
+            except (httpx.HTTPError, httpx.InvalidURL, ValueError):
                 continue
             for m in GITHUB_RE.finditer(html):
                 url = normalize_candidate(f"https://{m.group(0)}")
@@ -389,7 +389,11 @@ def main() -> None:
         # Easy papers (both URLs in HF metadata) are cheap; skip them once tier 1 is full.
         if paper["github"] and paper["project_page"] and have[1] >= quota.get(1, 0):
             continue
-        row = label_paper(paper, arxiv, web, llm, args)
+        try:
+            row = label_paper(paper, arxiv, web, llm, args)
+        except Exception as exc:  # noqa: BLE001 - one bad paper must not end a multi-hour job
+            print(f"[mine] skipped {paper['arxiv_id']}: {type(exc).__name__}: {exc}", flush=True)
+            continue
         if row is None or have[row["difficulty_tier"]] >= quota.get(row["difficulty_tier"], 0):
             continue
         have[row["difficulty_tier"]] += 1
