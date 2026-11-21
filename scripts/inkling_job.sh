@@ -20,6 +20,9 @@ MINI=thinkingmachines/Inkling-2-Mini
 TRACES_REPO=nielsr/inkling-2-mini-url-agent-traces
 TRACES_FILE=${TRACES_FILE:-train-inkling.jsonl}
 SFT_REPO=nielsr/inkling-2-mini-url-agent-lora
+SFT_MERGED=nielsr/inkling-2-mini-url-agent-sft-merged
+GRPO_REPO=nielsr/inkling-2-mini-url-agent-grpo-lora
+GRPO_MERGED=nielsr/inkling-2-mini-url-agent-grpo-merged
 # The inkling-2-mini image ships Blackwell kernels only (sm_100/sm_103 + an SM12x path); H200 (sm_90)
 # fails with "no kernel image is available" in csrc/inkling2/conv_mix.cu. Serve on RTX PRO 6000.
 SERVE_FLAVOR=${SERVE_FLAVOR:-rtx-pro-6000}
@@ -48,7 +51,7 @@ api = HfApi()
 api.create_repo("nielsr/inkling-2-mini-url-agent-code", private=True, exist_ok=True)
 files = ["evaluate_vllm.py", "generate_opencode_traces.py", "train_sft.py", "merge_adapter.py",
          "train_grpo_harness.py", "inkling_train_patch.py", "inkling_adapter.py", "scripts/rl-v2-ids.txt"]
-files += [f for f in sys.argv[2:]]
+files += ["scripts/rl-inkling-ids.txt"] + [f for f in sys.argv[2:]]
 for f in files:
     api.upload_file(path_or_fileobj=f, path_in_repo=f"code/{rev}/{f.split('/')[-1]}",
                     repo_id="nielsr/inkling-2-mini-url-agent-code")
@@ -109,5 +112,29 @@ echo SFT_DONE"
   hf jobs run --namespace "$NS" --name inkling-mini-sft --flavor h200 --timeout 8h --secrets HF_TOKEN \
     --detach ghcr.io/astral-sh/uv:python3.12-bookworm -- bash -c "$CMD"
   ;;
-*) echo "usage: $0 stage [extra files] | smoke REV | eval REV SPLIT TAG [args...] | sft REV [args...]" >&2; exit 2 ;;
+grpo)
+  # 2x RTX PRO 6000 (the vLLM image needs Blackwell): merge the SFT adapter into the checkpoint's BF16 attention,
+  # GRPO with the simple synchronous trainer (vLLM on GPU 0, trainer on GPU 1), merge the GRPO adapter.
+  # GRPO_TEST=1 runs 2 tiny steps on the base model without merging or publishing.
+  REV=${2:?REV}; shift 2
+  TRAIN="uv run --no-project --python 3.12 --with torch --with transformers==5.24.0 --with trl==1.18.2 --with peft==0.22.0 --with accelerate==1.16.0 --with openenv==0.14.0 --with datasets>=4.0.0 --with httpx>=0.27.0 --with huggingface-hub>=1.13.0 --with opencode-ai==0.1.0a36 --with pydantic>=2.10.0,<2.13 --with safetensors>=0.4.0 --with aiohttp>=3.13.3 --with requests --with pillow --with torchvision python"
+  GRPO_ARGS="--launch --trainer simple --vllm-binary \$(command -v vllm) --tool-call-parser inkling --reasoning-parser inkling --include-ids-file rl-inkling-ids.txt --protocol-weight 0.5 --temperature 1.0 --lora-r 64 --max-completion-length 4096 --max-model-calls 16 --episode-timeout 180 --report-to none"
+  if [ -n "${GRPO_TEST:-}" ]; then
+    BODY="\$TRAIN train_grpo_harness.py $GRPO_ARGS --model $MINI --max-steps 2 --prompts-per-step 2 --num-generations 4 --max-concurrent-rollouts 8 --output-dir /grpo-test --hub-model-id '' $*"
+    NAME=inkling-mini-grpo-test; TIMEOUT=1h
+  else
+    BODY="\$TRAIN merge_adapter.py --base-model $MINI --adapter $SFT_REPO --hub-model-id $SFT_MERGED --output /model
+\$TRAIN train_grpo_harness.py $GRPO_ARGS --model /model --max-steps 100 --prompts-per-step 4 --num-generations 8 --max-concurrent-rollouts 32 --save-steps 10 --output-dir /grpo-run --hub-model-id $GRPO_REPO $*
+\$TRAIN merge_adapter.py --base-model /model --adapter /grpo-run --hub-model-id $GRPO_MERGED --output /grpo-merged --card-base-model $MINI --card-adapter $GRPO_REPO"
+    NAME=inkling-mini-grpo; TIMEOUT=10h
+  fi
+  CMD="REV=$REV
+$PRELUDE
+TRAIN=\"$TRAIN\"
+$BODY
+echo GRPO_DONE"
+  hf jobs run --namespace "$NS" --name "$NAME" --flavor rtx-pro-6000x2 --timeout "$TIMEOUT" --secrets HF_TOKEN \
+    --detach "$VLLM_IMAGE" -- bash -c "$CMD"
+  ;;
+*) echo "usage: $0 stage [extra files] | smoke REV | eval REV SPLIT TAG [args...] | sft REV [args...] | grpo REV [args...]" >&2; exit 2 ;;
 esac
