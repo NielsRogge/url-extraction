@@ -71,6 +71,20 @@ STRUCTURED_OUTPUT_RETRY = (
 )
 
 
+def record_line(record: dict[str, Any]) -> str:
+    """One JSONL line for an episode record, written as UTF-8.
+
+    Tool output can contain lone UTF-16 surrogates (e.g. math symbols cut out of paper text), which UTF-8
+    cannot encode; those records fall back to ASCII-escaped JSON, which is still valid and round-trips.
+    """
+    line = json.dumps(record, ensure_ascii=False)
+    try:
+        line.encode("utf-8")
+    except UnicodeEncodeError:
+        line = json.dumps(record)
+    return line + "\n"
+
+
 def json_text(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
 

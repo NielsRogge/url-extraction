@@ -58,6 +58,7 @@ from harness.opencode import (  # noqa: E402,F401
     opencode_server,
     portable_trajectory,
     raw_json,
+    record_line,
     tool_events,
 )
 from harness.opencode import run_one as _run_one  # noqa: E402
@@ -265,8 +266,8 @@ async def evaluate(args: argparse.Namespace, output_path: Path) -> None:
                     record["evaluation_model"] = label
                     record["difficulty_tier"] = row.get("difficulty_tier")
                     record["served_model"] = model_id
-                    with output_path.open("a") as handle:
-                        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+                    with output_path.open("a", encoding="utf-8") as handle:
+                        handle.write(record_line(record))
                         handle.flush()
                     print(
                         f"  complete={record['attempt_complete']} correct={record['verification']['all_scoreable_correct']} "

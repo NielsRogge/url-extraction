@@ -42,6 +42,7 @@ from harness.opencode import (  # noqa: F401 - re-exported for tests and older i
     opencode_server,
     portable_trajectory,
     raw_json,
+    record_line,
     tool_events,
 )
 from harness.opencode import run_one as run_episode
@@ -225,13 +226,8 @@ async def async_main(args: argparse.Namespace) -> None:
                     if args.evaluation_label:  # e.g. "teacher": a teacher baseline in the evaluator's summary
                         record["evaluation_model"] = args.evaluation_label
                         record["difficulty_tier"] = row.get("difficulty_tier")
-                    try:
-                        line = json.dumps(record, ensure_ascii=False)
-                        line.encode("utf-8")
-                    except UnicodeEncodeError:  # lone surrogates from tool output; escaped form is still valid JSON
-                        line = json.dumps(record)
                     with args.output.open("a", encoding="utf-8") as handle:
-                        handle.write(line + "\n")
+                        handle.write(record_line(record))
                         handle.flush()
                     if args.sessions_dir:  # one Pi-format session per episode, for the Hub's agent-traces viewer
                         write_sessions([record], args.sessions_dir)

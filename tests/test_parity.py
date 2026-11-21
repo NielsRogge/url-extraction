@@ -211,3 +211,14 @@ def test_shortcut_guard_is_the_only_intentional_difference() -> None:
         evaluate_vllm.run_one(FakeOpenCode(messages, response), data, ("p", "m"), episode_timeout=30, max_tool_calls=15)
     )
     assert record["verification"]["all_scoreable_correct"]  # evaluation scores the answer; RL refuses to reward it
+
+
+def test_records_with_lone_surrogates_are_written(tmp_path):
+    """Tool output can hold lone surrogates (math symbols from papers); both writers must still emit JSONL."""
+    from harness.opencode import record_line
+
+    record = {"tool_events": [{"response": "x \ud835 y"}], "arxiv_id": ARXIV}
+    path = tmp_path / "out.jsonl"
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(record_line(record))
+    assert json.loads(path.read_text(encoding="utf-8"))["tool_events"][0]["response"] == "x \ud835 y"
