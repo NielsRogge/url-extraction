@@ -308,12 +308,19 @@ def probe_jobs(run: Run, rev: str, args: argparse.Namespace) -> list[Job]:
         ]  # fmt: skip
         if student.serve.vllm_extra_args:
             flags.append(f"--vllm-extra-args={q(student.serve.vllm_extra_args)}")
-        if args.grpo_ids and args.grpo_ids != "probe":  # probe a candidate pool instead of the whole split
-            flags += ["--include-ids-file", Path(args.grpo_ids).name]
+        select: list[str] = []
+        pool = Path(args.grpo_ids).name if args.grpo_ids and args.grpo_ids != "probe" else ""
+        if args.probe_exclude_tiers:  # candidates: scoreable train papers outside these tiers (within the pool)
+            select_flags = ["--dataset", q(run.dataset), "--split", "train", "--exclude-tiers", q(args.probe_exclude_tiers),
+                            "--output", "probe-candidates.txt"] + (["--include-ids-file", pool] if pool else [])  # fmt: skip
+            select = [python("-m harness.select", select_flags, deps=["datasets>=4.0.0", "pydantic>=2.10.0,<2.13"])]
+            pool = "probe-candidates.txt"
+        if pool:
+            flags += ["--include-ids-file", pool]
         flags += probe.args
         command = "\n".join(
-            [prelude(run, rev, image_vllm=student.serve.vllm == "image"), python("difficulty_probe.py", flags, deps=deps),
-             "echo PROBE_DONE"]  # fmt: skip
+            [prelude(run, rev, image_vllm=student.serve.vllm == "image"), *select,
+             python("difficulty_probe.py", flags, deps=deps), "echo PROBE_DONE"]  # fmt: skip
         )
         jobs.append(
             Job("probe", f"{run.name}-probe-{index}", student.serve.image, probe.flavor or student.serve.flavor,
@@ -342,7 +349,7 @@ def grpo_jobs(run: Run, rev: str, args: argparse.Namespace) -> list[list[Job]]:
     ids = grpo_ids_steps(run, args)
     if ids:
         train += ["--include-ids-file", ids[-1]]
-    train += grpo.args
+    train += grpo.args + shlex.split(args.grpo_args)
     waves: list[list[Job]] = []
     if not args.grpo_merge_only:
         command = "\n".join(
@@ -576,6 +583,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--run-name", help="Artifact name prefix (default: <student>-url-agent-<teacher>)")
     for name in ("traces-repo", "sft-adapter", "sft-merged", "grpo-adapter", "grpo-merged", "eval-repo", "code-repo"):
         parser.add_argument(f"--{name}", help=f"Override the {name.replace('-', ' ')} repo id")
+    parser.add_argument("--grpo-args", default="", help="Extra train_grpo_harness.py arguments (last flag wins)")
+    parser.add_argument("--probe-exclude-tiers", default="", help="Probe only train papers outside these tiers, e.g. 7")
     parser.add_argument("--grpo-merge-only", action="store_true", help="GRPO stage: merge the pushed adapter, no training")
     parser.add_argument("--rev", help="Reuse already staged code (code/<rev>/ in the code repo)")
     parser.add_argument("--wait", action="store_true", help="Wait for the jobs of a single stage")

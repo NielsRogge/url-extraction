@@ -104,3 +104,15 @@ def test_staging_includes_the_harness_package():
 def test_pep723_dependencies_are_parsed():
     deps = pipeline.script_dependencies("evaluate_vllm.py")
     assert any(dep.startswith("opencode-ai") for dep in deps) and any(dep.startswith("vllm") for dep in deps)
+
+
+def test_grpo_args_and_probe_tier_filter():
+    run, built = jobs(["--teacher", "glm-5.2", "--student", "qwen3.5-4b", "--stages", "merge,probe,grpo",
+                       "--sft-adapter", "nielsr/qwen35-4b-url-agent-lora-v2", "--probe-exclude-tiers", "7",
+                       "--grpo-args", "--learning-rate 2e-5 --max-steps 150"])  # fmt: skip
+    assert "--adapter nielsr/qwen35-4b-url-agent-lora-v2" in built["merge"][0].command
+    probe = built["probe"][0].command
+    assert "-m harness.select" in probe and "--exclude-tiers 7" in probe and "--include-ids-file probe-candidates.txt" in probe
+    train = built["grpo"][0].command
+    assert train.index("--max-steps 100") < train.index("--max-steps 150")  # the last flag wins
+    assert "--include-ids-file probe-ids.txt" in train

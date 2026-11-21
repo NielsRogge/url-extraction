@@ -128,6 +128,10 @@ uv run pipeline.py --teacher kimi-k3.1-pro --student qwen3.5-9b --dataset nielsr
 - GRPO prompt pool: `--grpo-ids FILE`, or `--grpo-ids probe` (the default when the probe stage runs) for
   the union of the probe's qualified IDs: papers the SFT policy solves sometimes but not always. With the
   probe, a FILE restricts the probed candidates instead.
+- `--probe-exclude-tiers 7` probes only scoreable train papers outside those difficulty tiers
+  (`python -m harness.select`). `--grpo-args '...'` appends trainer arguments, e.g.
+  `--learning-rate 2e-5 --max-steps 150 --exclude-tiers 7 --tier-weights 0:2,2:2,3:2,4:2,5:2,6:2`.
+- Starting from an existing SFT adapter: pass `--sft-adapter <repo>` and run from `merge` on.
 - `--grpo-merge-only` merges an already pushed GRPO adapter (recovery after a failed merge or eval).
 
 ### Reproducing the existing pairs
