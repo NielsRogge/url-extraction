@@ -49,7 +49,7 @@ from huggingface_hub import HfApi
 rev = sys.argv[1]
 api = HfApi()
 api.create_repo("nielsr/inkling-2-mini-url-agent-code", private=True, exist_ok=True)
-files = ["evaluate_vllm.py", "generate_opencode_traces.py", "train_sft.py", "merge_adapter.py",
+files = ["evaluate_vllm.py", "generate_opencode_traces.py", "train_sft.py", "merge_adapter.py", "difficulty_probe.py",
          "train_grpo_harness.py", "inkling_train_patch.py", "inkling_adapter.py", "scripts/rl-v2-ids.txt"]
 files += ["scripts/rl-inkling-ids.txt"] + [f for f in sys.argv[2:]]
 for f in files:
@@ -103,14 +103,31 @@ uvx --from 'huggingface-hub>=1.13' hf download $CODE_REPO --include 'code/$REV/*
 cp -r /work/stage/code/$REV/. /work/
 uvx --from 'huggingface-hub>=1.13' hf download $TRACES_REPO $TRACES_FILE --repo-type dataset --local-dir /work >/dev/null
 nvidia-smi --query-gpu=name,memory.total --format=csv || true
-uv run --no-project --python 3.12 --with torch --with transformers==5.24.0 --with trl==1.18.2 --with peft==0.22.0 \
-  --with accelerate==1.16.0 --with datasets --with pillow --with torchvision --with safetensors \
+uv run --no-project --python 3.12 --with torch --with 'transformers==5.24.0' --with 'trl==1.18.2' --with 'peft==0.22.0' \
+  --with 'accelerate==1.16.0' --with datasets --with pillow --with torchvision --with safetensors \
   python train_sft.py --traces /work/$TRACES_FILE --model $MINI --full-trajectory --no-4bit --max-length 32768 \
     --epochs 1 --lora-rank 64 --gradient-accumulation 16 --save-steps 10 --save-total-limit 2 \
     --output /out/sft --hub-model-id $SFT_REPO $*
 echo SFT_DONE"
   hf jobs run --namespace "$NS" --name inkling-mini-sft --flavor h200 --timeout 8h --secrets HF_TOKEN \
     --detach ghcr.io/astral-sh/uv:python3.12-bookworm -- bash -c "$CMD"
+  ;;
+probe)
+  # 1x RTX PRO 6000: difficulty probe of the merged SFT policy (harness-adapters recipe: K attempts per paper under
+  # the RL rollout conditions; papers solved sometimes but not always form the GRPO pool). Validated labels.
+  REV=${2:?REV}; SHARD=${3:?SHARD i/n}; shift 3
+  CMD="REV=$REV
+$PRELUDE
+uv run --no-project --python 3.12 --python-preference only-managed --with 'datasets>=4.0.0' --with 'httpx>=0.27.0' \
+  --with 'huggingface-hub>=1.13.0' --with 'opencode-ai==0.1.0a36' --with 'pydantic>=2.10.0,<2.13' --with 'python-dotenv>=1.1.0' \
+  --with 'safetensors>=0.4.0' --with torch python difficulty_probe.py --model $SFT_MERGED \
+  --vllm-binary \$(command -v vllm) --tool-call-parser inkling --reasoning-parser inkling \
+  --dataset nielsr/paper-url-extraction-v1-validated --include-ids-file rl-inkling-ids.txt --sample 300 --seed 0 \
+  --shard $SHARD --k 4 --concurrency 8 --temperature 1.0 --episode-timeout 300 --max-tool-calls 15 \
+  --max-output-tokens 4096 --output-dir /probe --output-repo $EVAL_REPO --tag probe-sft/shard-${SHARD%/*} $*
+echo PROBE_DONE"
+  hf jobs run --namespace "$NS" --name "inkling-probe-${SHARD%/*}" --flavor "$SERVE_FLAVOR" --timeout 5h --secrets HF_TOKEN \
+    --detach "$VLLM_IMAGE" -- bash -c "$CMD"
   ;;
 merge)
   # CPU: merge an attention-only adapter into the checkpoint's BF16 attention (experts stay NVFP4/MXFP8) and publish.
@@ -120,8 +137,8 @@ command -v uv >/dev/null || pip install -q uv
 mkdir -p /work && cd /work
 uvx --from 'huggingface-hub>=1.13' hf download $CODE_REPO --include 'code/$REV/*' --local-dir /work/stage >/dev/null
 cp -r /work/stage/code/$REV/. /work/
-uv run --no-project --python 3.12 --with torch --with transformers==5.24.0 --with peft==0.22.0 --with accelerate==1.16.0 \
-  --with huggingface-hub>=1.13.0 --with safetensors>=0.5.0 --with pillow --with torchvision \
+uv run --no-project --python 3.12 --with torch --with 'transformers==5.24.0' --with 'peft==0.22.0' --with 'accelerate==1.16.0' \
+  --with 'huggingface-hub>=1.13.0' --with 'safetensors>=0.5.0' --with pillow --with torchvision \
   python merge_adapter.py --base-model $MINI --adapter $ADAPTER --hub-model-id $OUT_REPO --output /merged --public $*
 echo MERGE_DONE"
   hf jobs run --namespace "$NS" --name inkling-mini-merge --flavor cpu-xl --timeout 2h --secrets HF_TOKEN \
@@ -151,5 +168,5 @@ echo GRPO_DONE"
   hf jobs run --namespace "$NS" --name "$NAME" --flavor rtx-pro-6000x2 --timeout "$TIMEOUT" --secrets HF_TOKEN \
     --detach "$VLLM_IMAGE" -- bash -c "$CMD"
   ;;
-*) echo "usage: $0 stage [extra files] | smoke REV | eval REV SPLIT TAG [args...] | sft REV [args...] | grpo REV [args...]" >&2; exit 2 ;;
+*) echo "usage: $0 stage [extra files] | smoke REV | eval REV SPLIT TAG [args...] | sft REV [args...] | grpo REV [args...] | probe REV i/n | merge REV ADAPTER OUT_REPO" >&2; exit 2 ;;
 esac
