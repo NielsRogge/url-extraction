@@ -43,7 +43,7 @@ EVAL="uv run --no-project --python 3.12 --python-preference only-managed --with 
 case "${1:-}" in
 stage)
   REV=$(date +%Y%m%d-%H%M%S)
-  uv run -q --no-project --with "huggingface-hub>=1.13" python - "$REV" <<'PY'
+  uv run -q --no-project --with "huggingface-hub>=1.13" python - "$REV" "${@:2}" <<'PY'
 import sys
 from huggingface_hub import HfApi
 rev = sys.argv[1]
