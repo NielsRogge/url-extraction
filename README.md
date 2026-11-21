@@ -104,6 +104,7 @@ uv run train_grpo_harness.py --launch --model /model --include-ids-file scripts/
 | `train_sft.py` | LoRA SFT on accepted trajectories |
 | `train_grpo_harness.py` | GRPO in OpenCode via TRL `HarnessAsyncGRPOTrainer` + OpenEnv capture |
 | `evaluate_vllm.py` | Paired base vs. adapter evaluation in OpenCode, served by vLLM |
+| `trace_export.py` | Episodes as Pi sessions for the Hub agent-traces viewer ([docs/data.md](docs/data.md)) |
 | `merge_adapter.py` | Merge a LoRA into a standalone checkpoint |
 | `validate_labels.py`, `tier_labels.py`, `difficulty_probe.py`, `mine_papers.py` | Label validation, difficulty tiers, RL prompt selection, mining harder papers ([docs/data.md](docs/data.md)) |
 | `space/` | Side-by-side demo Space |
