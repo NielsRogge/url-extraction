@@ -38,7 +38,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from datasets import Dataset, DatasetDict, load_dataset
+from datasets import Dataset, DatasetDict, Features, List, Value, load_dataset
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -193,7 +193,15 @@ def main() -> None:
     splits = {}
     summary: dict[str, Any] = {}
     for split in ("train", "validation", "test"):
-        rows = [dict(r) for r in load_dataset(args.dataset, split=split)]
+        source = load_dataset(args.dataset, split=split)
+        features = Features(
+            {
+                **source.features,
+                **{f"reference_{n}_aliases": List(Value("string")) for n in FIELDS},
+                **{f"{n}_validation": Value("string") for n in FIELDS},
+            }
+        )
+        rows = [dict(r) for r in source]
         if args.limit:
             rows = rows[: args.limit]
         validated = asyncio.run(validate_rows(rows, args.concurrency))
@@ -203,7 +211,7 @@ def main() -> None:
         checks = scorer_checks(validated)
         summary[split] = {"rows": len(rows), "label_status": dict(sorted(counts.items())), "scorer_checks": dict(checks)}
         print(split, json.dumps(summary[split], indent=2), flush=True)
-        splits[split] = Dataset.from_list(validated)
+        splits[split] = Dataset.from_list(validated, features=features)
 
     failures = {s: {k: v for k, v in d["scorer_checks"].items() if k.endswith("FAIL")} for s, d in summary.items()}
     args.output_dir.mkdir(parents=True, exist_ok=True)
