@@ -910,6 +910,7 @@ def train_simple(args: argparse.Namespace) -> None:
     if args.include_ids_file:
         include = {line.strip() for line in Path(args.include_ids_file).read_text().splitlines() if line.strip()}
     rows = load_rows(args.dataset, args.split, exclude, args.n_prompts, args.seed, include)
+    rows = weight_by_tier(rows, args.exclude_tiers, args.tier_weights, args.seed)
     vllm_url = f"http://127.0.0.1:{args.vllm_port}"
     sampling = training_sampling(
         {"temperature": args.temperature, "top_p": 1.0, "top_k": 0, "repetition_penalty": 1.0}
