@@ -159,7 +159,7 @@ def main() -> None:
                         repo_id=args.output_repo, repo_type="dataset")  # fmt: skip
         card = DatasetCard.load(args.output_repo, repo_type="dataset")
         card.text = card_text(summary)
-        card.data.tags = sorted(set((card.data.tags or []) + ["agents", "url-extraction", "opencode"]))
+        card.data.tags = sorted(set((getattr(card.data, "tags", None) or []) + ["agents", "url-extraction", "opencode"]))
         card.push_to_hub(args.output_repo, repo_type="dataset")
         print(f"published {args.output_repo}", flush=True)
 
