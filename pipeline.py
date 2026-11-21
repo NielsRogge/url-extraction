@@ -393,6 +393,8 @@ def eval_jobs(run: Run, rev: str, args: argparse.Namespace) -> list[Job]:
         "--episode-timeout", str(EVAL_RECIPE["episode_timeout"]), "--max-tool-calls", str(EVAL_RECIPE["max_tool_calls"]),
         "--output-repo", q(run.eval_repo), "--public",
     ]  # fmt: skip
+    if args.eval_include_partial:
+        common.append("--include-partial")
     # tag -> (served base model, adapter); the evaluator runs base and adapter on the same papers.
     variants = {
         "base": (student.model, "''"),
@@ -402,51 +404,53 @@ def eval_jobs(run: Run, rev: str, args: argparse.Namespace) -> list[Job]:
     tags = {"base": "base/", "sft": "sft/", "grpo": "sft-grpo/", "teacher": "teacher/"}
     jobs = []
     for variant in [v for v in args.eval_variants.split(",") if v]:
-        if variant == "teacher":
-            jobs.append(teacher_eval_job(run, rev, splits, args))
-            continue
-        base, adapter = variants[variant]
-        steps = []
+        # One job per (variant, split): splits run in parallel and a failure reruns only its split.
         for split in splits:
+            if variant == "teacher":
+                jobs.append(teacher_eval_job(run, rev, split, args))
+                continue
+            base, adapter = variants[variant]
             evaluate = [
                 *common, "--split", split, "--base-model", base, "--adapter", adapter, "--tag", tags[variant],
                 "--output", f"/eval/{variant}/{split}.jsonl", *serve_flags(student),
             ]  # fmt: skip
-            steps.append(evaluator(student, evaluate))
-        command = "\n".join([prelude(run, rev, image_vllm=student.serve.vllm == "image"), *steps, "echo EVAL_DONE"])
-        jobs.append(
-            Job("eval", f"{run.name}-eval-{variant}", student.serve.image, student.serve.flavor,
-                student.serve.timeout, command, {})  # fmt: skip
-        )
+            command = "\n".join(
+                [prelude(run, rev, image_vllm=student.serve.vllm == "image"), evaluator(student, evaluate), "echo EVAL_DONE"]
+            )
+            jobs.append(
+                Job("eval", f"{run.name}-eval-{variant}-{split.replace('_', '-')}", student.serve.image,
+                    student.serve.flavor, student.serve.timeout, command, {})  # fmt: skip
+            )
     return jobs
 
 
-def teacher_eval_job(run: Run, rev: str, splits: list[str], args: argparse.Namespace) -> Job:
-    """The teacher baseline under the students' evaluation settings (one attempt, same limits)."""
+def teacher_eval_job(run: Run, rev: str, split: str, args: argparse.Namespace) -> Job:
+    """The teacher baseline on one split under the students' evaluation settings (one attempt, same limits)."""
     teacher = run.teacher
-    steps = []
-    for split in splits:
-        generate = [
-            "--dataset", q(run.dataset), "--split", split, "--limit", str(args.eval_limit), "--attempts-per-row", "1",
-            "--concurrency", str(teacher.traces.baseline_concurrency),
-            "--episode-timeout", str(EVAL_RECIPE["episode_timeout"]),
-            "--max-tool-calls", str(EVAL_RECIPE["max_tool_calls"]), "--model", q(teacher.opencode_model),
-            "--hf-bill-to", JOB_NAMESPACE, "--evaluation-label", "teacher", "--no-resume",
-            "--output", f"/eval/teacher/{split}.jsonl", "--output-repo", q(run.eval_repo),
-            "--path-in-repo", f"teacher/{split}.jsonl", "--public",
-        ]  # fmt: skip
-        if teacher.opencode_model_entry:
-            generate += ["--opencode-model-entry", q(json.dumps(teacher.opencode_model_entry))]
-        summary = f"/eval/teacher/{split}-summary.json"
-        steps += [
-            python("generate_opencode_traces.py", generate),
-            f"uv run --no-project --with 'pydantic>=2.10.0,<2.13' python -m harness.report summarize "
-            f"/eval/teacher/{split}.jsonl --output {summary} >/dev/null",
-            f"{HF_CLI} upload {q(run.eval_repo)} {summary} teacher/{split}-summary.json --repo-type dataset",
-        ]
-    command = "\n".join([prelude(run, rev), "mkdir -p /eval/teacher", *steps, "echo EVAL_DONE"])
-    return Job("eval", f"{run.name}-eval-teacher", UV_IMAGE, run.teacher.traces.flavor, "6h", command,
-               {"HF_BILL_TO": JOB_NAMESPACE})  # fmt: skip
+    generate = [
+        "--dataset", q(run.dataset), "--split", split, "--limit", str(args.eval_limit), "--attempts-per-row", "1",
+        "--concurrency", str(teacher.traces.baseline_concurrency),
+        "--episode-timeout", str(EVAL_RECIPE["episode_timeout"]),
+        "--max-tool-calls", str(EVAL_RECIPE["max_tool_calls"]), "--model", q(teacher.opencode_model),
+        "--hf-bill-to", JOB_NAMESPACE, "--evaluation-label", "teacher", "--no-resume",
+        "--output", f"/eval/teacher/{split}.jsonl", "--output-repo", q(run.eval_repo),
+        "--path-in-repo", f"teacher/{split}.jsonl", "--public",
+    ]  # fmt: skip
+    if args.eval_include_partial:  # the same paper population as the evaluator's --include-partial
+        generate.append("--accept-partial")
+    if teacher.opencode_model_entry:
+        generate += ["--opencode-model-entry", q(json.dumps(teacher.opencode_model_entry))]
+    summary = f"/eval/teacher/{split}-summary.json"
+    command = "\n".join([
+        prelude(run, rev), "mkdir -p /eval/teacher",
+        python("generate_opencode_traces.py", generate),
+        f"uv run --no-project --with 'pydantic>=2.10.0,<2.13' python -m harness.report summarize "
+        f"/eval/teacher/{split}.jsonl --output {summary} >/dev/null",
+        f"{HF_CLI} upload {q(run.eval_repo)} {summary} teacher/{split}-summary.json --repo-type dataset",
+        "echo EVAL_DONE",
+    ])  # fmt: skip
+    return Job("eval", f"{run.name}-eval-teacher-{split.replace('_', '-')}", UV_IMAGE, run.teacher.traces.flavor, "8h",
+               command, {"HF_BILL_TO": JOB_NAMESPACE})  # fmt: skip
 
 
 # --------------------------------------------------------------------------------------------------
@@ -572,6 +576,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--splits", default="test,validation", help="Evaluation splits, e.g. test,validation,test_hard")
     parser.add_argument("--eval-variants", default="sft,grpo,teacher", help="Comma list of base,sft,grpo,teacher")
     parser.add_argument("--eval-limit", type=int, default=50, help="Scoreable papers per split")
+    parser.add_argument(
+        "--eval-include-partial",
+        action="store_true",
+        help="Evaluate every paper with at least one verified requested label (scored on verified fields only)",
+    )
     parser.add_argument("--trace-shards", type=int, default=0, help="Parallel trace jobs (default: teacher profile)")
     parser.add_argument("--traces-files", default="raw/train-*.jsonl", help="Trace files in --traces-repo for SFT")
     parser.add_argument(

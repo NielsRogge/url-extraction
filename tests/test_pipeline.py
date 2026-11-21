@@ -46,8 +46,9 @@ def test_kimi_9b_jobs_match_the_old_pipeline_script():
     grpo = built["grpo"][0]
     assert grpo.flavor == "h200x2" and "--include-ids-file rl-kimi-9b-ids.txt" in grpo.command
     assert "--max-concurrent-rollouts 16" in grpo.command and "--trainer trl" in grpo.command
-    tags = {job.name.rsplit("-", 1)[-1]: job for job in built["eval"]}
-    assert set(tags) == {"sft", "grpo", "teacher"}
+    tags = {job.name.split("-eval-")[1]: job for job in built["eval"]}  # one job per (variant, split)
+    assert set(tags) == {f"{v}-{s}" for v in ("sft", "grpo", "teacher") for s in ("test", "validation")}
+    tags = {name.rsplit("-", 1)[0]: job for name, job in tags.items() if name.endswith("-test")}
     assert "--tag sft/" in tags["sft"].command and "--tag sft-grpo/" in tags["grpo"].command
     assert "--evaluation-label teacher" in tags["teacher"].command
     for job in [*built["traces"], *built["eval"]]:
@@ -73,8 +74,19 @@ def test_teacher_baseline_concurrency():
 def test_extra_splits_and_any_dataset():
     _, built = jobs(["--teacher", "glm-5.2", "--student", "qwen3.5-4b", "--stages", "eval", "--splits", "test,test_hard",
                      "--dataset", "nielsr/paper-url-extraction-v2"])  # fmt: skip
+    names = {job.name.split("-eval-")[1] for job in built["eval"]}
+    assert names == {f"{v}-{s}" for v in ("sft", "grpo", "teacher") for s in ("test", "test-hard")}
     for job in built["eval"]:
-        assert "--split test_hard" in job.command and "--dataset nielsr/paper-url-extraction-v2" in job.command
+        assert "--dataset nielsr/paper-url-extraction-v2" in job.command
+    assert any("--split test_hard" in job.command for job in built["eval"])
+
+
+def test_include_partial_reaches_students_and_teacher():
+    _, built = jobs(["--teacher", "glm-5.2", "--student", "qwen3.5-4b", "--stages", "eval", "--splits", "test_hard",
+                     "--eval-variants", "sft,teacher", "--eval-include-partial", "--eval-limit", "1000"])  # fmt: skip
+    student, teacher = built["eval"]
+    assert "--include-partial" in student.command and "--limit 1000" in student.command
+    assert "--accept-partial" in teacher.command and "--evaluation-label teacher" in teacher.command
 
 
 def test_inkling_jobs_use_the_image_vllm_and_hooks():

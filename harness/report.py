@@ -255,6 +255,55 @@ def print_report(report: dict[str, Any]) -> None:
             print("  no per-episode differences")
 
 
+def results_table(repo: str, dataset: str, *, labels: dict[str, str] | None = None, revision: str | None = None) -> str:
+    """Markdown table per (model, split): all evaluated papers and the fully scoreable subset.
+
+    `labels` maps "<dir>/<label>" (e.g. "sft-grpo/adapter") to a display name; others use that key.
+    """
+    from datasets import get_dataset_split_names, load_dataset
+    from huggingface_hub import HfApi, hf_hub_download
+
+    from harness.scoring import fully_scoreable
+
+    rows = {}
+    for split in get_dataset_split_names(dataset):
+        for row in load_dataset(dataset, split=split):
+            rows[int(row["paper_id"])] = dict(row)
+    api = HfApi()
+    files = sorted(
+        name
+        for name in api.list_repo_files(repo, repo_type="dataset", revision=revision)
+        if name.endswith(".jsonl") and "/" in name and not name.startswith(("sessions/", "difficulty/"))
+    )
+    lines = [
+        "| Model | Split | Field acc. (all) | Exact (all) | Field acc. (fully scoreable) | Exact (fully scoreable) | Tool calls |",
+        "|---|---|---:|---:|---:|---:|---:|",
+    ]
+    for name in files:
+        directory, split = name.rsplit("/", 1)
+        split = split.removesuffix(".jsonl")
+        records = [
+            {**r, "evaluation_model": r.get("evaluation_model") or "teacher"}
+            for r in load_records(Path(hf_hub_download(repo, name, repo_type="dataset", revision=revision)))
+        ]
+        for label in sorted({r["evaluation_model"] for r in records}):
+            mine = [r for r in records if r["evaluation_model"] == label]
+            full = [r for r in mine if fully_scoreable(rows[int(r["paper_id"])])]
+            every, subset = summarize(mine)["models"][label], summarize(full)["models"][label]
+
+            def pct(model: dict[str, Any]) -> str:
+                fields = sum(f["total"] for f in model["fields"].values())
+                return f"{100 * model['field_accuracy']:.1f}% ({fields})" if model["field_accuracy"] is not None else "-"
+
+            key = f"{directory}/{label}"
+            lines.append(
+                f"| {(labels or {}).get(key, key)} | {split} | {pct(every)} | {every['exact_match_episodes']}/{every['episodes']} "
+                f"| {pct(subset)} | {subset['exact_match_episodes']}/{subset['episodes']} "
+                f"| {every['average_tool_calls']:.1f} |"
+            )
+    return "\n".join(lines)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -268,7 +317,14 @@ def main() -> None:
     rescore_parser.add_argument("--revision")
     rescore_parser.add_argument("--max-tool-calls", type=int, default=15, help="The limit the episodes ran with")
     rescore_parser.add_argument("--json", type=Path, help="Also write the full report here")
+    table_parser = commands.add_parser("table", help="Markdown results table: all papers and fully scoreable subset")
+    table_parser.add_argument("--repo", required=True)
+    table_parser.add_argument("--dataset", required=True)
+    table_parser.add_argument("--label", action="append", default=[], help="dir/label=Display name, repeatable")
     args = parser.parse_args()
+    if args.command == "table":
+        print(results_table(args.repo, args.dataset, labels=dict(item.split("=", 1) for item in args.label)))
+        return
     if args.command == "summarize":
         records = [record for path in args.files for record in load_records(path)]
         text = json.dumps(summarize(records), indent=2, sort_keys=True) + "\n"
