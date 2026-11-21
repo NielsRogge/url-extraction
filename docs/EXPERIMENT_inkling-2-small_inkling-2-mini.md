@@ -32,6 +32,24 @@ against a label set.
   already high and barely moves. The student keeps reasoning in almost every call, about 25% shorter than
   the base model's. With 42-50 papers per split, differences of a few points are within noise.
 
+### Harder held-out papers (`test_hard`)
+
+`nielsr/paper-url-extraction-v2` adds a `test_hard` split of 175 papers (94 fully scoreable; the others have at
+least one requested field without a verifiable label and are scored on the remaining fields, `--include-partial`).
+
+| Model | Field acc. (269 fields, 175 papers) | Exact (175) | Field acc. (188 fields, 94 fully scoreable) | Exact (94) | Tool calls | Timeouts |
+|---|---:|---:|---:|---:|---:|---:|
+| Inkling-2-Mini base | 76.2% | 123 | **83.0%** | **74** | 7.9 | 33 |
+| Inkling-2-Mini SFT (adapter) | 72.1% | 115 | 77.1% | 66 | 7.9 | 38 |
+| Inkling-2-Small teacher (DeepInfra) | **80.7%** | **132** | 84.0% | 73 | 11.3 | - |
+
+On these harder papers SFT does not help: it follows the research protocol more often (protocol-complete
+episodes 97 -> 109, project-page-after-GitHub violations 29 -> 15) but times out more (33 -> 38) and loses 4-6
+points of field accuracy. The paired difference is not significant (base-only exact 20 papers, SFT-only 12;
+two-sided binomial p = 0.22). The teacher needs 11.3 tool calls per paper here, so many `test_hard` papers need
+more than the student's 180 s / 15-tool budget; base Inkling-2-Mini comes within one point of the teacher on
+the fully scoreable subset.
+
 ## What is different about Inkling-2-Mini
 
 - **Serving.** No vLLM release supports `inkling2_loop`; the only build is the `vllm/vllm-openai:inkling-2-mini`
