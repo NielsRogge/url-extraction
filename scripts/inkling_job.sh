@@ -156,7 +156,7 @@ grpo)
     NAME=inkling-mini-grpo-test; TIMEOUT=1h
   else
     BODY="uvx --from 'huggingface-hub>=1.13' hf download $SFT_MERGED --local-dir /model >/dev/null
-\$TRAIN train_grpo_harness.py $GRPO_ARGS --model /model --max-steps 100 --prompts-per-step 2 --num-generations 4 --max-concurrent-rollouts 8 --learning-rate 2e-5 --dataset nielsr/paper-url-extraction-v1-validated --save-steps 10 --output-dir /grpo-run --hub-model-id $GRPO_REPO --public $*
+\$TRAIN train_grpo_harness.py $GRPO_ARGS --model /model --max-steps 100 --prompts-per-step 2 --num-generations 4 --max-concurrent-rollouts 8 --learning-rate 2e-5 --dataset nielsr/paper-url-extraction-v1-validated --save-steps 10 --output-dir /grpo-run --hub-model-id $GRPO_REPO --card-base-model $SFT_MERGED --public $*
 \$TRAIN merge_adapter.py --base-model /model --adapter /grpo-run --hub-model-id $GRPO_MERGED --output /grpo-merged --card-base-model $MINI --card-adapter $GRPO_REPO --public"
     NAME=inkling-mini-grpo; TIMEOUT=10h
   fi

@@ -834,6 +834,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--dspark", action="store_true", help="Serve with the checkpoint's DSpark speculative drafter")
     parser.add_argument("--vllm-extra-args", default="", help="Extra arguments appended to `vllm serve` (shell-quoted)")
+    parser.add_argument("--card-base-model", help="Hub repo id to name as base_model in adapter cards (when --model is a local path)")
     parser.add_argument("--log-rollouts", action="store_true", help="simple trainer: one diagnostic line per rollout")
     return parser.parse_args()
 
@@ -1025,6 +1026,29 @@ def train_simple(args: argparse.Namespace) -> None:
         targets = torch.tensor([ids[p] for p in positions], device=device)
         return torch.log_softmax(logits, dim=-1).gather(-1, targets[:, None])[:, 0]
 
+    card_base = args.card_base_model or (args.model if not Path(args.model).exists() else None)
+
+    def write_card(folder: Path, step: int | None) -> None:
+        """PEFT's card names the local base path, which the Hub rejects as `base_model`; name the Hub repo instead."""
+        lines = ["---", "library_name: peft", "tags:", "- grpo", "- inkling2", "- lora"]
+        if card_base:
+            lines.insert(1, f"base_model: {card_base}")
+        title = f"Inkling-2-Mini URL agent GRPO adapter{f' (step {step})' if step else ''}"
+        (folder / "README.md").write_text("\n".join(lines + ["---", "", f"# {title}", "",
+            f"Attention-only LoRA trained with GRPO (`train_grpo_harness.py --trainer simple`) on top of `{card_base}`.", ""]))
+
+    def push(folder: Path, path_in_repo: str, required: str) -> None:
+        """Upload and verify; a failed push is reported but never ends the run."""
+        try:
+            api.upload_folder(repo_id=args.hub_model_id, folder_path=str(folder), path_in_repo=path_in_repo,
+                              allow_patterns=["adapter_*", "README.md", "metrics.jsonl"])
+            landed = {f.rfilename for f in api.model_info(args.hub_model_id).siblings}
+            if required not in landed:
+                raise RuntimeError(f"{required} did not land")
+            print(f"[simple] pushed {path_in_repo or 'final adapter'} to {args.hub_model_id}", flush=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[simple] WARNING: push of {path_in_repo or 'final adapter'} failed: {exc}", flush=True)
+
     metrics_path = output / "metrics.jsonl"
     cursor = 0
     random.Random(args.seed).shuffle(rows)
@@ -1122,19 +1146,13 @@ def train_simple(args: argparse.Namespace) -> None:
                 raw = output / f"checkpoint-{step}"
                 if not raw.exists():
                     model.save_pretrained(raw)
-                api.upload_folder(repo_id=args.hub_model_id, folder_path=str(raw), path_in_repo=f"checkpoint-{step}")
-                api.upload_file(repo_id=args.hub_model_id, path_or_fileobj=str(metrics_path), path_in_repo="metrics.jsonl")
-                landed = {f.rfilename for f in api.model_info(args.hub_model_id).siblings}
-                if f"checkpoint-{step}/adapter_model.safetensors" not in landed:
-                    raise RuntimeError(f"checkpoint-{step} did not land on {args.hub_model_id}")
-                print(f"[simple] pushed checkpoint-{step} to {args.hub_model_id}", flush=True)
+                write_card(raw, step)
+                shutil.copy(metrics_path, raw / "metrics.jsonl")
+                push(raw, f"checkpoint-{step}", f"checkpoint-{step}/adapter_model.safetensors")
     model.save_pretrained(output)
+    write_card(output, None)
     if api:
-        api.upload_folder(repo_id=args.hub_model_id, folder_path=str(output), allow_patterns=["adapter_*", "README.md", "metrics.jsonl"])
-        landed = {f.rfilename for f in api.model_info(args.hub_model_id).siblings}
-        if "adapter_model.safetensors" not in landed:
-            raise RuntimeError(f"final adapter did not land on {args.hub_model_id}")
-        print(f"[simple] pushed final adapter to {args.hub_model_id}", flush=True)
+        push(output, "", "adapter_model.safetensors")
 
 
 def main() -> None:
