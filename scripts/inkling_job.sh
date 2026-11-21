@@ -112,6 +112,21 @@ echo SFT_DONE"
   hf jobs run --namespace "$NS" --name inkling-mini-sft --flavor h200 --timeout 8h --secrets HF_TOKEN \
     --detach ghcr.io/astral-sh/uv:python3.12-bookworm -- bash -c "$CMD"
   ;;
+merge)
+  # CPU: merge an attention-only adapter into the checkpoint's BF16 attention (experts stay NVFP4/MXFP8) and publish.
+  REV=${2:?REV}; ADAPTER=${3:?ADAPTER}; OUT_REPO=${4:?OUT_REPO}; shift 4
+  CMD="set -euo pipefail
+command -v uv >/dev/null || pip install -q uv
+mkdir -p /work && cd /work
+uvx --from 'huggingface-hub>=1.13' hf download $CODE_REPO --include 'code/$REV/*' --local-dir /work/stage >/dev/null
+cp -r /work/stage/code/$REV/. /work/
+uv run --no-project --python 3.12 --with torch --with transformers==5.24.0 --with peft==0.22.0 --with accelerate==1.16.0 \
+  --with huggingface-hub>=1.13.0 --with safetensors>=0.5.0 --with pillow --with torchvision \
+  python merge_adapter.py --base-model $MINI --adapter $ADAPTER --hub-model-id $OUT_REPO --output /merged $*
+echo MERGE_DONE"
+  hf jobs run --namespace "$NS" --name inkling-mini-merge --flavor cpu-xl --timeout 2h --secrets HF_TOKEN \
+    --detach ghcr.io/astral-sh/uv:python3.12-bookworm -- bash -c "$CMD"
+  ;;
 grpo)
   # 2x RTX PRO 6000 (the vLLM image needs Blackwell): merge the SFT adapter into the checkpoint's BF16 attention,
   # GRPO with the simple synchronous trainer (vLLM on GPU 0, trainer on GPU 1), merge the GRPO adapter.
@@ -123,7 +138,7 @@ grpo)
     BODY="\$TRAIN train_grpo_harness.py $GRPO_ARGS --model $MINI --max-steps 2 --prompts-per-step 2 --num-generations 4 --max-concurrent-rollouts 8 --output-dir /grpo-test --hub-model-id '' $*"
     NAME=inkling-mini-grpo-test; TIMEOUT=1h
   else
-    BODY="\$TRAIN merge_adapter.py --base-model $MINI --adapter $SFT_REPO --hub-model-id $SFT_MERGED --output /model
+    BODY="uvx --from 'huggingface-hub>=1.13' hf download $SFT_MERGED --local-dir /model >/dev/null
 \$TRAIN train_grpo_harness.py $GRPO_ARGS --model /model --max-steps 60 --prompts-per-step 2 --num-generations 8 --max-concurrent-rollouts 16 --save-steps 10 --output-dir /grpo-run --hub-model-id $GRPO_REPO $*
 \$TRAIN merge_adapter.py --base-model /model --adapter /grpo-run --hub-model-id $GRPO_MERGED --output /grpo-merged --card-base-model $MINI --card-adapter $GRPO_REPO"
     NAME=inkling-mini-grpo; TIMEOUT=10h
