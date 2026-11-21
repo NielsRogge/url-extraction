@@ -37,3 +37,27 @@ git worktree remove ../url-extraction-new-feature
 git branch -D claude/new-feature
 git push origin --delete claude/new-feature
 ```
+
+## Hub artifacts
+
+- Every artifact this project publishes on the Hugging Face Hub (models, adapters, datasets, trace and evaluation datasets, and Spaces) must be added to the project collection: https://huggingface.co/collections/nielsr/paper-url-agent-frontier-to-small-distillation-6b01c8378db0ff55d524014e
+- Add it when the repo is created, with a one-line note saying what it is (teacher, student, stage).
+- Visibility: models and datasets are public. Spaces, code snapshots (repos or buckets holding job code) and this GitHub repository stay private.
+- Before making a dataset public, scan it for credentials (`hf_`, `sk-`, `ghp_` tokens); `trace_export.py` redacts HF tokens in sessions.
+- Agent traces must always be uploaded in a form the Hub's [agent-traces viewer](https://huggingface.co/docs/hub/en/agent-traces) can open: one Pi-format session per episode under `sessions/`, produced by `trace_export.py`. Never upload episode JSONL with full trajectories (teacher traces, evaluation episodes) on its own; slim summaries such as `difficulty_probe.py` attempts are exempt.
+  - `generate_opencode_traces.py --output-repo ...` and `evaluate_vllm.py --output-repo ...` already publish the sessions; prefer them over manual uploads.
+  - After any other upload (e.g. `hf upload`, bucket copies promoted to a dataset), run `uv run trace_export.py --repo <dataset>` (optionally `--files <path>`).
+  - New scripts that publish episodes must call `trace_export.publish_sessions`, and HF Jobs code staging must include `trace_export.py`.
+  - Check that the dataset page shows the traces in Data Studio before reporting the upload as done.
+
+Example:
+
+```python
+from huggingface_hub import HfApi
+
+HfApi().add_collection_item(
+    "nielsr/paper-url-agent-frontier-to-small-distillation-6b01c8378db0ff55d524014e",
+    item_id="nielsr/<repo>", item_type="model",  # or "dataset" / "space"
+    note="Qwen3.5-4B GRPO v3 adapter (from SFT v2)", exists_ok=True,
+)
+```

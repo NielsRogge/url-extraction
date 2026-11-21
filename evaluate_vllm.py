@@ -851,7 +851,7 @@ def mcnemar_exact(b: int, c: int) -> float:
     n = b + c
     if n == 0:
         return 1.0
-    tail = sum(comb(n, k) for k in range(0, min(b, c) + 1)) / 2**n
+    tail = sum(comb(n, k) for k in range(min(b, c) + 1)) / 2**n
     return min(1.0, 2 * tail)
 
 
@@ -960,6 +960,13 @@ def publish(args: argparse.Namespace, output_path: Path, summary_path: Path) -> 
         repo_type="dataset",
         commit_message=f"Add {args.split} evaluation summary",
     )
+    try:
+        from trace_export import publish_sessions
+    except ImportError:
+        print("trace_export.py not found next to evaluate_vllm.py; skipping agent-trace sessions", flush=True)
+        return
+    count = publish_sessions(api, args.output_repo, output_path, f"{args.tag}{args.split}.jsonl")
+    print(f"published {count} agent-trace sessions to {args.output_repo}", flush=True)
 
 
 def parse_args() -> argparse.Namespace:

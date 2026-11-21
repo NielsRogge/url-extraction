@@ -22,7 +22,7 @@ EVAL_FLAGS="--limit 50 --concurrency 8 --episode-timeout 180 --max-tool-calls 15
 
 stage_code() {
   REV=kimi9b-$(date +%Y%m%d-%H%M)
-  for f in train_sft.py train_grpo_harness.py evaluate_vllm.py merge_adapter.py "$IDS"; do
+  for f in train_sft.py train_grpo_harness.py evaluate_vllm.py trace_export.py merge_adapter.py "$IDS"; do
     hf buckets cp "$f" "hf://buckets/$BUCKET/code/$REV/$(basename "$f")" >/dev/null
   done
   echo "$REV"
