@@ -238,7 +238,12 @@ def trace_jobs(run: Run, rev: str, args: argparse.Namespace) -> list[Job]:
             generate.append("--accept-partial")
         if teacher.opencode_model_entry:
             generate += ["--opencode-model-entry", q(json.dumps(teacher.opencode_model_entry))]
-        command = "\n".join([prelude(run, rev), python("generate_opencode_traces.py", generate)])
+        # A rerun resumes from the shard's published records instead of paying for those papers again.
+        resume = (
+            f"mkdir -p /work/out && ({HF_CLI} download {q(run.traces_repo)} raw/train-{index}.jsonl --repo-type dataset "
+            f"--local-dir /work/prev >/dev/null 2>&1 && cp /work/prev/raw/train-{index}.jsonl /work/out/) || true"
+        )
+        command = "\n".join([prelude(run, rev), resume, python("generate_opencode_traces.py", generate)])
         jobs.append(
             Job("traces", f"{run.name}-traces-{index}", UV_IMAGE, settings.flavor, settings.timeout, command,
                 {"HF_BILL_TO": JOB_NAMESPACE})  # fmt: skip
@@ -429,16 +434,18 @@ def launch(jobs: list[Job], args: argparse.Namespace) -> list[str]:
                   f"namespace={JOB_NAMESPACE} env={job.env} secrets=HF_TOKEN")  # fmt: skip
             print(job.command)
         return []
-    from huggingface_hub import HfApi
+    from huggingface_hub import HfApi, get_token
 
-    api = HfApi()
+    api, token = HfApi(), get_token()
+    if not token:
+        raise SystemExit("no Hugging Face token (set HF_TOKEN or run `hf auth login`)")
     ids = []
     for job in jobs:
         info = api.run_job(
             image=job.image,
             command=["bash", "-c", job.command],
             env=job.env or None,
-            secrets={"HF_TOKEN": api.token},
+            secrets={"HF_TOKEN": token},
             flavor=job.flavor,
             timeout=job.timeout,
             name=job.name,
