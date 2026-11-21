@@ -48,7 +48,6 @@ from datasets import load_dataset
 from huggingface_hub import HfApi, snapshot_download
 from opencode_ai import AsyncOpencode
 from pydantic import BaseModel, ConfigDict, HttpUrl, StringConstraints, ValidationError, field_validator
-from safetensors.torch import load_file, save_file
 
 DATASET_ID = "nielsr/paper-url-extraction-v1"
 ADAPTER_ID = "nielsr/qwen35-4b-url-agent-lora"
@@ -212,8 +211,10 @@ def score_findings(row: dict[str, Any], findings: URLFindings) -> dict[str, Any]
             field_scores[name] = None
             continue
         predicted = canonical_url(getattr(findings, f"{name}_url"))
-        expected = canonical_url(row.get(f"reference_{name}_url"))
-        field_scores[name] = predicted == expected
+        # Validated datasets list other URLs for the same target (e.g. a renamed GitHub repo's redirect).
+        accepted = {canonical_url(row.get(f"reference_{name}_url"))}
+        accepted |= {canonical_url(alias) for alias in row.get(f"reference_{name}_aliases") or []}
+        field_scores[name] = predicted in accepted
     scoreable = [value for value in field_scores.values() if value is not None]
     return {
         "fields": field_scores,
@@ -680,6 +681,8 @@ def start_vllm(args: argparse.Namespace, adapter_path: str) -> subprocess.Popen:
 
 def prepare_text_adapter(source: str, destination: Path) -> str:
     """Remove inert vision-tower tensors that text-only vLLM correctly rejects."""
+    from safetensors.torch import load_file, save_file
+
     source_path = Path(source)
     if destination.exists():
         shutil.rmtree(destination)
@@ -687,8 +690,11 @@ def prepare_text_adapter(source: str, destination: Path) -> str:
     tensors = load_file(source_path / "adapter_model.safetensors", device="cpu")
     text_tensors = {name: tensor for name, tensor in tensors.items() if ".visual." not in name}
     removed = set(tensors) - set(text_tensors)
-    if not removed or not text_tensors:
-        raise RuntimeError("Expected both visual and text LoRA tensors in the trained adapter")
+    if not text_tensors:
+        raise RuntimeError("Expected text LoRA tensors in the trained adapter")
+    if not removed:
+        # Adapters trained on the language model only (e.g. the GRPO stage) need no filtering.
+        print(f"Adapter has {len(text_tensors)} text-only tensors; no visual tensors to remove", flush=True)
     nonzero_visual_b = [name for name in removed if ".lora_B." in name and bool(tensors[name].count_nonzero().item())]
     if nonzero_visual_b:
         raise RuntimeError("Refusing to remove trained visual LoRA tensors")
@@ -741,6 +747,14 @@ def fully_scoreable(row: dict[str, Any]) -> bool:
     return bool(qualities) and all(quality in SCOREABLE_QUALITIES for quality in qualities)
 
 
+def partly_scoreable(row: dict[str, Any]) -> bool:
+    """At least one requested field has a verified label (unscored fields are simply not counted)."""
+    return any(
+        bool(row[f"missing_{name}"]) and row.get(f"{name}_label_quality") in SCOREABLE_QUALITIES
+        for name in ("github", "project_page")
+    )
+
+
 def completed_keys(path: Path) -> set[tuple[str, int]]:
     if not path.exists():
         return set()
@@ -754,7 +768,8 @@ def completed_keys(path: Path) -> set[tuple[str, int]]:
 
 
 async def evaluate(args: argparse.Namespace, output_path: Path) -> None:
-    rows = [dict(row) for row in load_dataset(args.dataset, split=args.split) if fully_scoreable(dict(row))]
+    keep = partly_scoreable if args.include_partial else fully_scoreable
+    rows = [dict(row) for row in load_dataset(args.dataset, split=args.split) if keep(dict(row))]
     if args.paper_ids:
         requested_ids = {int(value) for value in args.paper_ids.split(",")}
         rows = [row for row in rows if int(row["paper_id"]) in requested_ids]
@@ -791,6 +806,7 @@ async def evaluate(args: argparse.Namespace, output_path: Path) -> None:
                         max_tool_calls=args.max_tool_calls,
                     )
                     record["evaluation_model"] = label
+                    record["difficulty_tier"] = row.get("difficulty_tier")
                     record["served_model"] = model_id
                     with output_path.open("a") as handle:
                         handle.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -813,6 +829,17 @@ async def evaluate(args: argparse.Namespace, output_path: Path) -> None:
 def load_records(path: Path) -> list[dict[str, Any]]:
     with path.open() as handle:
         return [json.loads(line) for line in handle if line.strip()]
+
+
+def mcnemar_exact(b: int, c: int) -> float:
+    """Two-sided exact McNemar p-value from the discordant pair counts."""
+    from math import comb
+
+    n = b + c
+    if n == 0:
+        return 1.0
+    tail = sum(comb(n, k) for k in range(0, min(b, c) + 1)) / 2**n
+    return min(1.0, 2 * tail)
 
 
 def summarize(records: list[dict[str, Any]]) -> dict[str, Any]:
@@ -858,8 +885,33 @@ def summarize(records: list[dict[str, Any]]) -> dict[str, Any]:
             "failed_tool_recovery_rate": (recovered_failures / total_failures) if total_failures else None,
             "failure_reasons": dict(failures.most_common()),
         }
+    tiers = sorted({record.get("difficulty_tier") for record in records if record.get("difficulty_tier") is not None})
+    for label in ("base", "adapter"):
+        by_tier = {}
+        for tier in tiers:
+            selected = [r for r in records if r.get("evaluation_model") == label and r.get("difficulty_tier") == tier]
+            exact = sum(bool((r.get("verification") or {}).get("all_scoreable_correct")) for r in selected)
+            by_tier[str(tier)] = {"episodes": len(selected), "exact_match_episodes": exact}
+        summary["models"][label]["by_difficulty_tier"] = by_tier
     base = summary["models"]["base"]
     adapter = summary["models"]["adapter"]
+    exact_by_paper = {
+        label: {
+            int(r["paper_id"]): bool((r.get("verification") or {}).get("all_scoreable_correct"))
+            for r in records
+            if r.get("evaluation_model") == label and r.get("paper_id") is not None
+        }
+        for label in ("base", "adapter")
+    }
+    shared = sorted(set(exact_by_paper["base"]) & set(exact_by_paper["adapter"]))
+    gained = sum(exact_by_paper["adapter"][p] and not exact_by_paper["base"][p] for p in shared)
+    lost = sum(exact_by_paper["base"][p] and not exact_by_paper["adapter"][p] for p in shared)
+    summary["paired"] = {
+        "papers": len(shared),
+        "adapter_only_correct": gained,
+        "base_only_correct": lost,
+        "mcnemar_exact_p": mcnemar_exact(gained, lost),
+    }
     summary["comparison"] = {
         "field_accuracy_delta": (
             adapter["field_accuracy"] - base["field_accuracy"]
@@ -876,18 +928,21 @@ def summarize(records: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def publish(args: argparse.Namespace, output_path: Path, summary_path: Path) -> None:
+    if not args.output_repo:
+        print(f"Results kept at {output_path} and {summary_path}; no output repo", flush=True)
+        return
     api = HfApi(token=os.environ.get("HF_TOKEN"))
     api.create_repo(args.output_repo, repo_type="dataset", private=True, exist_ok=True)
     api.upload_file(
         path_or_fileobj=str(output_path),
-        path_in_repo=f"{args.split}.jsonl",
+        path_in_repo=f"{args.tag}{args.split}.jsonl",
         repo_id=args.output_repo,
         repo_type="dataset",
         commit_message=f"Add {args.split} OpenCode evaluation episodes",
     )
     api.upload_file(
         path_or_fileobj=str(summary_path),
-        path_in_repo=f"{args.split}-summary.json",
+        path_in_repo=f"{args.tag}{args.split}-summary.json",
         repo_id=args.output_repo,
         repo_type="dataset",
         commit_message=f"Add {args.split} evaluation summary",
@@ -901,10 +956,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--start", type=int, default=0)
     parser.add_argument("--limit", type=int, default=50)
     parser.add_argument("--paper-ids", help="Comma-separated paper IDs; overrides --start and --limit")
+    parser.add_argument(
+        "--include-partial",
+        action="store_true",
+        help="Also evaluate papers where only some requested fields have verified labels",
+    )
     parser.add_argument("--base-model", default=BASE_MODEL)
     parser.add_argument("--adapter", default=ADAPTER_ID)
     parser.add_argument("--output", type=Path, default=Path("/artifacts/qwen35-4b-url-agent-eval/validation.jsonl"))
     parser.add_argument("--output-repo", default="nielsr/qwen35-4b-url-agent-eval")
+    parser.add_argument("--tag", default="", help="Prefix for published file names, e.g. 'sft-v2/'")
     parser.add_argument("--concurrency", type=int, default=2)
     parser.add_argument("--episode-timeout", type=float, default=240)
     parser.add_argument("--request-timeout", type=float, default=600)
@@ -922,7 +983,9 @@ def main(args: argparse.Namespace) -> None:
     args.opencode_binary = install_opencode(workdir / "bin" / "opencode")
     os.environ["PATH"] = str(args.opencode_binary.parent) + os.pathsep + os.environ["PATH"]
     configure_opencode(args)
-    adapter_snapshot = snapshot_download(args.adapter, token=os.environ["HF_TOKEN"])
+    adapter_snapshot = (
+        args.adapter if Path(args.adapter).is_dir() else snapshot_download(args.adapter, token=os.environ["HF_TOKEN"])
+    )
     adapter_path = prepare_text_adapter(adapter_snapshot, workdir / "text-adapter")
     server = start_vllm(args, adapter_path)
     try:

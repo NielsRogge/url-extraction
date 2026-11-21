@@ -7,6 +7,8 @@
 #   "safetensors>=0.5.0",
 #   "torch>=2.7.0",
 #   "transformers==5.14.1",
+#   "torchvision",
+#   "pillow",
 # ]
 # ///
 """Merge the URL-agent LoRA into Qwen3.5 and publish a standalone HF model."""
@@ -94,7 +96,9 @@ def merge(args: argparse.Namespace) -> Path:
     if not token:
         raise RuntimeError("HF_TOKEN must be passed as a Job secret")
 
-    adapter_snapshot = Path(snapshot_download(args.adapter, token=token))
+    adapter_snapshot = (
+        Path(args.adapter) if Path(args.adapter).is_dir() else Path(snapshot_download(args.adapter, token=token))
+    )
     verify_adapter_base(adapter_snapshot, args.base_model)
     audit = audit_visual_lora(adapter_snapshot)
     print(f"Adapter audit: {json.dumps(audit, sort_keys=True)}", flush=True)
@@ -117,8 +121,13 @@ def merge(args: argparse.Namespace) -> Path:
     # the standalone merged repository can boot without reaching back to the
     # base model repository.
     AutoProcessor.from_pretrained(args.base_model).save_pretrained(output)
-    (output / "README.md").write_text(model_card(args.base_model, args.adapter))
+    # The Hub only accepts repo ids as `base_model`; a local merge base (e.g. /model) gets the card's override.
+    card_base = args.card_base_model or (args.base_model if not Path(args.base_model).exists() else "Qwen/Qwen3.5-4B")
+    (output / "README.md").write_text(model_card(card_base, args.card_adapter or args.adapter))
 
+    if not args.hub_model_id:
+        print(f"Saved merged checkpoint to {output}; skipping Hub upload", flush=True)
+        return output
     api = HfApi(token=token)
     api.create_repo(args.hub_model_id, repo_type="model", private=args.private, exist_ok=True)
     api.upload_folder(
@@ -139,6 +148,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hub-model-id", default=OUTPUT_REPO)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--max-shard-size", default="4GB")
+    parser.add_argument("--card-base-model", help="Repo id to list as base_model in the model card")
+    parser.add_argument("--card-adapter", help="Repo id to link as the adapter in the model card")
     parser.add_argument("--public", dest="private", action="store_false")
     parser.set_defaults(private=True)
     return parser.parse_args()

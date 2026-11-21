@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Same Paper, Two Agents</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Source+Sans+3:ital,wght@0,400;0,600;0,700;1,400&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --page:#f7f7f6; --card:#fcfcfb; --card-2:#f3f3f1; --ink:#1d1d1b; --ink-2:#55544f; --muted:#8a8984;
+  --line:#e2e1dc; --panel:#f3f4f6; --panel-line:#e1e3e8;
+  --head-teacher:#e8e8ea; --head-student:#f9dcd5;
+  --verb:#2a62c4; --verb-quiet:#6d6c67; --verb-answer:#0b7a3b;
+  --ok-bg:#e7f4ea; --ok-line:#7cc493; --ok-ink:#1f6b35;
+  --bad-bg:#fbe3df; --bad-line:#e79c91; --bad-ink:#a32d22;
+  --warn-bg:#fdf2d8; --warn-line:#e7c269; --warn-ink:#7a5600;
+  --run-bg:#eef0f4; --run-line:#cfd4de; --run-ink:#4a5263;
+  --mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --page:#141413; --card:#1b1b1a; --card-2:#232321; --ink:#ecebe6; --ink-2:#b4b3ad; --muted:#8a8984;
+    --line:#2f2f2c; --panel:#202124; --panel-line:#30323a;
+    --head-teacher:#2c2d31; --head-student:#4a2a24;
+    --verb:#7fb0ff; --verb-quiet:#a3a29c; --verb-answer:#58c983;
+    --ok-bg:#16301f; --ok-line:#2f7a48; --ok-ink:#7fdc9e;
+    --bad-bg:#3a1c18; --bad-line:#8a3a30; --bad-ink:#ff9b8e;
+    --warn-bg:#352a10; --warn-line:#8a6a1f; --warn-ink:#f2c869;
+    --run-bg:#24262c; --run-line:#3a3e48; --run-ink:#b9c0cf;
+  }
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--page);color:var(--ink);font-family:"Source Sans 3",system-ui,sans-serif;font-size:16px;line-height:1.45}
+main{max-width:1040px;margin:0 auto;padding:32px 16px 48px}
+h1{font-size:1.6rem;font-weight:700;margin:0 0 6px;letter-spacing:-.01em}
+.lede{color:var(--ink-2);margin:0 0 20px;max-width:760px}
+form{display:flex;gap:8px;flex-wrap:wrap}
+input[type=text]{flex:1 1 280px;font:inherit;font-size:1rem;padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--ink)}
+input[type=text]:focus{outline:2px solid var(--verb);outline-offset:-1px}
+button{font:inherit;font-weight:600;cursor:pointer;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--ink);padding:9px 16px}
+button.primary{background:var(--ink);color:var(--page);border-color:var(--ink)}
+button:disabled{opacity:.45;cursor:default}
+.examples{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:10px 0 24px;color:var(--muted);font-size:.9rem}
+.examples button{font-family:var(--mono);font-weight:400;font-size:.82rem;padding:3px 9px;border-radius:6px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+.card-top{display:flex;justify-content:space-between;align-items:center;padding:14px 18px;border-bottom:1px solid var(--line)}
+.eyebrow{font-size:.74rem;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-2)}
+.card-top button{font-size:.88rem;padding:6px 14px}
+.card-body{padding:18px;background:var(--card-2)}
+.task{font-weight:700;font-size:1.02rem;margin:0 0 12px}
+.task a{color:inherit;text-decoration-color:var(--muted)}
+.task .src{display:block;font-weight:400;font-size:.85rem;color:var(--muted)}
+.grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px}
+.side{min-width:0;display:flex;flex-direction:column}
+.outcome{margin-top:12px;min-width:0}
+.panel{border:1px solid var(--panel-line);border-radius:8px;background:var(--panel);overflow:hidden;display:flex;flex-direction:column}
+.panel-head{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:8px 12px;font-weight:600;font-size:.95rem}
+.panel.teacher .panel-head{background:var(--head-teacher)}
+.panel.student .panel-head{background:var(--head-student)}
+.panel-head .name{display:flex;align-items:center;gap:7px;min-width:0}
+.panel-head .name span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.panel-head .count{font-family:var(--mono);font-weight:600;font-size:.88rem;white-space:nowrap}
+.icon{width:16px;height:16px;flex:0 0 16px}
+.rows{height:268px;overflow-y:auto;padding:10px 12px;font-family:var(--mono);font-size:.82rem;scroll-behavior:smooth}
+.row{display:flex;gap:10px;line-height:1.75;white-space:nowrap}
+.row.new{animation:enter .25s ease-out}
+.row .verb{flex:0 0 3.9em;font-weight:600;color:var(--verb)}
+.row .verb.quiet{color:var(--verb-quiet)}
+.row .verb.answer{color:var(--verb-answer)}
+.row .arg{overflow:hidden;text-overflow:ellipsis;color:var(--ink)}
+.row.rejected .arg{text-decoration:line-through;color:var(--muted)}
+.row.think .verb{color:var(--muted);font-weight:400}
+.row.think .arg{color:var(--muted);font-family:"Source Sans 3",sans-serif;font-style:italic;font-size:.9rem}
+.note{margin-top:4px;font-size:.8rem;color:var(--muted);font-style:italic}
+.note.err-detail{font-style:normal;font-family:var(--mono);font-size:.74rem;color:var(--bad-ink);word-break:break-word}
+.row.error .verb{color:var(--bad-ink)}
+.row .arg.writing{color:var(--muted);font-style:italic}
+.row.live .arg::after{content:" ▍";animation:blink 1s steps(1) infinite;color:var(--muted)}
+.empty-rows{color:var(--muted);font-family:"Source Sans 3",sans-serif;font-size:.9rem;padding-top:4px}
+@keyframes enter{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:none}}
+@keyframes blink{50%{opacity:0}}
+.pill{border:1px solid var(--run-line);background:var(--run-bg);color:var(--run-ink);border-radius:6px;padding:6px 10px;text-align:center;font-weight:600;font-size:.88rem}
+.pill.ok{border-color:var(--ok-line);background:var(--ok-bg);color:var(--ok-ink)}
+.pill.bad{border-color:var(--bad-line);background:var(--bad-bg);color:var(--bad-ink)}
+.pill.warn{border-color:var(--warn-line);background:var(--warn-bg);color:var(--warn-ink)}
+.answers{margin-top:8px;font-size:.86rem;color:var(--ink-2)}
+.answers div{display:flex;gap:8px;align-items:baseline;min-width:0}
+.answers .k{flex:0 0 7.4em;color:var(--muted)}
+.answers a{color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.answers .v{margin-left:auto;font-weight:600;white-space:nowrap}
+.answers .v.correct{color:var(--ok-ink)}.answers .v.wrong{color:var(--bad-ink)}.answers .v.unlabelled{color:var(--muted);font-weight:400}
+.answers .exp{display:block;color:var(--muted);font-size:.8rem;padding-left:7.9em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.meta{margin-top:4px;font-size:.8rem;color:var(--muted);font-variant-numeric:tabular-nums}
+.caption{padding:12px 18px;border-top:1px solid var(--line);font-style:italic;color:var(--ink-2);font-size:.92rem;min-height:2.9em}
+.notice{margin:0 0 12px;padding:8px 12px;border-radius:8px;background:var(--warn-bg);color:var(--warn-ink);font-size:.9rem;display:none}
+.notice.show{display:block}
+footer{margin-top:18px;font-size:.85rem;color:var(--muted)}
+footer a{color:inherit}
+@media (max-width:720px){.grid{grid-template-columns:minmax(0,1fr)}.rows{height:200px}.panel-head .count{font-size:.8rem}}
+</style>
+</head>
+<body>
+<main>
+  <h1>Same paper, two agents</h1>
+  <p class="lede">A 4B model, distilled from a frontier teacher's OpenCode traces and refined with RL (GRPO through OpenEnv), races that teacher to find a paper's official GitHub repository and project page. Both run in the unmodified OpenCode harness with the same tools, prompt and answer format.</p>
+  <form id="form" autocomplete="off">
+    <input id="paper" type="text" placeholder="arXiv ID or URL, e.g. 2604.12575" aria-label="arXiv ID or URL">
+    <button class="primary" id="go" type="submit">Race</button>
+  </form>
+  <div class="examples">Try:
+    <button type="button" data-ex="2604.12575">2604.12575</button>
+    <button type="button" data-ex="2309.09958">2309.09958</button>
+    <button type="button" data-ex="2604.11004">2604.11004</button>
+    <button type="button" data-ex="2601.05851">2601.05851</button>
+  </div>
+  <p class="notice" id="notice"></p>
+
+  <section class="card" aria-live="polite">
+    <div class="card-top">
+      <span class="eyebrow">Same paper, two agents</span>
+      <button id="replay" type="button" disabled>replay</button>
+    </div>
+    <div class="card-body">
+      <p class="task" id="task">Pick a paper to start a race.</p>
+      <div class="grid">
+        <div class="side">
+          <div class="panel teacher" id="p-teacher">
+            <div class="panel-head"><div class="name"><span id="n-teacher">frontier teacher</span></div><div class="count" id="c-teacher">tool calls: 0</div></div>
+            <div class="rows" id="r-teacher"><div class="empty-rows">Waiting for a paper…</div></div>
+          </div>
+          <div class="outcome"><div class="pill" id="o-teacher">idle</div><div class="answers" id="a-teacher"></div><div class="meta" id="m-teacher"></div></div>
+        </div>
+        <div class="side">
+          <div class="panel student" id="p-student">
+            <div class="panel-head"><div class="name">
+              <svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><rect x="1.5" y="1.5" width="13" height="13" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M4.5 10.5l2-5 2 3.5 1.5-2 1.5 3.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>
+              <span id="n-student">GRPO student</span></div><div class="count" id="c-student">tool calls: 0</div></div>
+            <div class="rows" id="r-student"><div class="empty-rows">Waiting for a paper…</div></div>
+          </div>
+          <div class="outcome"><div class="pill" id="o-student">idle</div><div class="answers" id="a-student"></div><div class="meta" id="m-student"></div></div>
+        </div>
+      </div>
+    </div>
+    <div class="caption" id="caption">Same harness, same tools: watch how each model researches the paper.</div>
+  </section>
+
+  <footer>Each agent gets at most <span id="budget">15</span> tool calls and 180 s. The student runs on this Space's single GPU; the teacher runs on Hugging Face Inference Providers. Teacher cost uses provider prices; student cost is GPU time for the request.</footer>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const QUIET = new Set(["read", "glob"]);
+let frames = [];          // recorded {t, payload} of the latest race, for replay
+let source = null;
+let replayTimer = null;
+
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+function renderRows(side, run) {
+  const box = $("r-" + side);
+  const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+  if (!run.rows.length) {
+    const msg = { waking: "Waking the GPU…", waiting: "Starting OpenCode…", running: "Thinking…" }[run.status] || "No tool calls.";
+    box.innerHTML = `<div class="empty-rows">${msg}</div>`;
+    return;
+  }
+  const before = Number(box.dataset.n || 0);
+  const html = run.rows.map((r, i) => {
+    const live = run.status === "running" && i === run.rows.length - 1 && r.status !== "completed";
+    const cls = ["row", i >= before ? "new" : "", r.verb === "think" ? "think" : "", r.status === "rejected" ? "rejected" : "", r.status === "error" ? "error" : "", live ? "live" : ""].join(" ");
+    const vcls = r.verb === "answer" ? "answer" : QUIET.has(r.verb) ? "quiet" : "";
+    const tip = r.out ? `${r.arg}\n\n→ ${r.out}${r.out_len > r.out.length ? " …" : ""}` : r.arg;
+    return `<div class="${cls}"><span class="verb ${vcls}">${esc(r.verb)}</span><span class="arg${r.arg === "writing…" ? " writing" : ""}" title="${esc(tip)}">${esc(r.arg)}</span></div>`;
+  }).join("");
+  if (box.dataset.h !== html) {
+    box.dataset.h = html;
+    box.innerHTML = html;
+    box.dataset.n = String(run.rows.length);
+    box.dataset.s = run.status;
+    if (atBottom || run.status === "running") box.scrollTop = box.scrollHeight;
+  }
+}
+
+function renderOutcome(side, run, winner, budget) {
+  const pill = $("o-" + side);
+  let cls = "pill", text;
+  if (run.status === "waking") text = "waking the GPU…";
+  else if (run.status === "waiting") text = "starting…";
+  else if (run.status === "running") text = `running · ${run.elapsed.toFixed(1)} s`;
+  else if (!run.answer) { cls += " bad"; text = `✕ ${run.error || "no answer"} after ${run.tool_calls} tool calls`; }
+  else if (run.scored && run.correct === run.scored) { cls += " ok"; text = `✓ ${run.correct}/${run.scored} URLs correct in ${run.tool_calls} tool calls`; }
+  else if (run.scored && run.correct > 0) { cls += " warn"; text = `⚠ ${run.correct}/${run.scored} URLs correct in ${run.tool_calls} tool calls`; }
+  else if (run.scored) { cls += " bad"; text = `✕ 0/${run.scored} URLs correct in ${run.tool_calls} tool calls`; }
+  else { cls += " ok"; text = `answered in ${run.tool_calls} tool calls`; }
+  if (run.status === "done" && winner === run.side) text += " · first";
+  pill.className = cls;
+  pill.textContent = text;
+
+  const box = $("a-" + side);
+  if (run.answer) {
+    const line = (k, label) => {
+      const a = run.answer[k];
+      const url = a.url ? `<a href="${esc(a.url)}" target="_blank" rel="noopener">${esc(a.url.replace(/^https?:\/\//, ""))}</a>` : `<span>none</span>`;
+      const v = { correct: "✓ correct", wrong: "✕ wrong", unlabelled: "no label" }[a.verdict];
+      const exp = a.verdict === "wrong" ? `<span class="exp">expected ${esc(a.expected || "none")}</span>` : "";
+      return `<div><span class="k">${label}</span>${url}<span class="v ${a.verdict}">${v}</span></div>${exp}`;
+    };
+    box.innerHTML = line("github", "GitHub") + line("project_page", "Project page");
+  } else box.innerHTML = "";
+  const meta = run.status === "waking" || run.status === "waiting" ? "" :
+    `${run.elapsed.toFixed(1)} s · ${(run.tokens / 1000).toFixed(1)}K tokens · $${run.cost.toFixed(4)}`;
+  const quiet = run.status === "done" && run.side === "student" && !run.thoughts && run.tool_calls
+    ? `<div class="note">No visible reasoning: this model was trained on the teacher's tool calls only.</div>` : "";
+  const detail = run.error_detail ? `<div class="note err-detail">${esc(run.error_detail)}</div>` : "";
+  $("m-" + side).innerHTML = esc(meta) + detail + quiet;
+}
+
+function render(p) {
+  $("task").innerHTML = `Find the official GitHub repo and project page for <a href="https://huggingface.co/papers/${esc(p.paper.id)}" target="_blank" rel="noopener">${esc(p.paper.title)}</a>` +
+    `<span class="src">arXiv ${esc(p.paper.id)} · answers checked against ${esc(p.paper.source)}</span>`;
+  $("budget").textContent = p.budget;
+  for (const side of ["teacher", "student"]) {
+    const run = p[side];
+    $("n-" + side).textContent = side === "student" ? `GRPO student · ${run.label}` : `frontier teacher · ${run.label.split("/").pop()}`;
+    $("c-" + side).textContent = `tool calls: ${run.tool_calls}`;
+    renderRows(side, run);
+    renderOutcome(side, run, p.winner, p.budget);
+  }
+  $("caption").textContent = p.caption;
+}
+
+function notice(text) { const n = $("notice"); n.textContent = text || ""; n.classList.toggle("show", !!text); }
+
+function busy(on) { $("go").disabled = on; document.querySelectorAll("[data-ex]").forEach((b) => (b.disabled = on)); $("replay").disabled = on || !frames.length; }
+
+function resetRows() { for (const s of ["teacher", "student"]) { const b = $("r-" + s); b.dataset.n = ""; b.dataset.s = ""; b.dataset.h = ""; } }
+
+function start(paper) {
+  if (!paper.trim()) return;
+  if (source) source.close();
+  clearTimeout(replayTimer);
+  notice("");
+  frames = [];
+  resetRows();
+  busy(true);
+  source = new EventSource(`/api/race?paper=${encodeURIComponent(paper.trim())}`);
+  source.addEventListener("frame", (e) => { const p = JSON.parse(e.data); frames.push(p); render(p); });
+  source.addEventListener("queued", (e) => notice(JSON.parse(e.data).message));
+  source.addEventListener("failed", (e) => { notice(JSON.parse(e.data).message); source.close(); busy(false); });
+  source.addEventListener("done", () => { source.close(); notice(""); busy(false); });
+  source.onerror = () => {
+    if (source.readyState === EventSource.CLOSED) return;
+    source.close(); busy(false);
+    if (!frames.length) notice("Could not start the race. Check the paper ID and try again.");
+  };
+}
+
+function replay() {
+  if (!frames.length) return;
+  clearTimeout(replayTimer);
+  resetRows();
+  const total = frames[frames.length - 1].t || 1;
+  const speed = Math.max(1, total / 14);   // compress long races into ~14 s
+  let i = 0;
+  const step = () => {
+    render(frames[i]);
+    i += 1;
+    if (i < frames.length) replayTimer = setTimeout(step, Math.max(60, ((frames[i].t - frames[i - 1].t) * 1000) / speed));
+  };
+  step();
+}
+
+$("form").addEventListener("submit", (e) => { e.preventDefault(); start($("paper").value); });
+document.querySelectorAll("[data-ex]").forEach((b) => b.addEventListener("click", () => { $("paper").value = b.dataset.ex; start(b.dataset.ex); }));
+$("replay").addEventListener("click", replay);
+
+fetch("/api/status").then((r) => r.json()).then((s) => {
+  if (s.hf_cli_ok === false) notice("Warning: the hf CLI the agents rely on failed its self-test in this container; results may be degraded.");
+}).catch(() => {});
+
+// A recorded race, so the page has something to show (and replay) before anyone spends GPU time.
+fetch("/static/examples/default.json").then((r) => (r.ok ? r.json() : null)).then((rec) => {
+  if (!rec || frames.length) return;
+  frames = rec;
+  render(frames[frames.length - 1]);
+  $("replay").disabled = false;
+}).catch(() => {});
+</script>
+</body>
+</html>

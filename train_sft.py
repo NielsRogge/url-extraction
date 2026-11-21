@@ -138,6 +138,64 @@ def terminal_trajectory(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return result
 
 
+def normalized_messages(record: dict[str, Any]) -> list[dict[str, Any]]:
+    messages = []
+    for raw_message in terminal_trajectory(record["trajectory"]):
+        message = copy.deepcopy(raw_message)
+        if message.get("role") == "tool" and len(message.get("content", "")) > MAX_TOOL_CONTENT_CHARS:
+            content = message["content"]
+            message["content"] = content[:6_000] + "\n[tool output compacted for SFT]\n" + content[-2_000:]
+        for tool_call in message.get("tool_calls", []):
+            arguments = tool_call.get("function", {}).get("arguments")
+            if isinstance(arguments, str):
+                tool_call["function"]["arguments"] = json.loads(arguments)
+        messages.append(message)
+    return messages
+
+
+def render_trajectory_examples(
+    records: list[dict[str, Any]], tokenizer: Any, max_length: int | None = None
+) -> Dataset:
+    """One example per trajectory, supervising every assistant turn.
+
+    Equivalent to the per-turn examples whenever each turn's prompt is a textual prefix of the
+    rendered full conversation (checked per trajectory), at a fraction of the compute because the
+    shared context is processed once. Trajectories that fail the check fall back to per-turn examples.
+    """
+    examples: list[dict[str, Any]] = []
+    fallback: list[dict[str, Any]] = []
+    for record in records:
+        messages = normalized_messages(record)
+        full = tokenizer.apply_chat_template(messages, tools=TOOLS, tokenize=False, add_generation_prompt=False)
+        spans: list[list[int]] = []
+        stable = True
+        for index, message in enumerate(messages):
+            if message.get("role") != "assistant":
+                continue
+            prompt = tokenizer.apply_chat_template(
+                messages[:index], tools=TOOLS, tokenize=False, add_generation_prompt=True
+            )
+            through = tokenizer.apply_chat_template(
+                messages[: index + 1], tools=TOOLS, tokenize=False, add_generation_prompt=False
+            )
+            if not (full.startswith(prompt) and full.startswith(through) and through.startswith(prompt)):
+                stable = False
+                break
+            if through[len(prompt) :].strip():
+                spans.append([len(prompt), len(through)])
+        if not stable:
+            fallback.append(record)
+            continue
+        if spans:
+            examples.append({"prompt": full, "completion": "", "spans": json.dumps(spans)})
+    if fallback:
+        print(f"{len(fallback)} trajectories are not prefix-stable; using per-turn examples for them", flush=True)
+        for row in render_examples(fallback, tokenizer, max_length):
+            examples.append({**row, "spans": ""})
+    print(f"Rendered {len(examples)} examples from {len(records)} trajectories", flush=True)
+    return Dataset.from_list(examples)
+
+
 def render_examples(records: list[dict[str, Any]], tokenizer: Any, max_length: int | None = None) -> Dataset:
     examples: list[dict[str, str]] = []
     for record in records:
@@ -181,6 +239,18 @@ def tokenize_examples(dataset: Dataset, tokenizer: Any, max_length: int) -> Data
         text = example["prompt"] + example["completion"]
         encoded = tokenizer(text, add_special_tokens=False, return_offsets_mapping=True)
         input_ids = list(encoded["input_ids"])
+        if example.get("spans"):
+            spans = json.loads(example["spans"])
+            completion_mask = [
+                int(any(end > start_span and start < end_span for start_span, end_span in spans))
+                for start, end in encoded["offset_mapping"]
+            ]
+            if len(input_ids) > max_length:
+                # Keep the supervised turns that fit; later turns are truncated away.
+                input_ids, completion_mask = input_ids[:max_length], completion_mask[:max_length]
+            if any(completion_mask):
+                rows.append({"input_ids": input_ids, "completion_mask": completion_mask})
+            continue
         boundary = len(example["prompt"])
         completion_mask = [int(end > boundary) for _, end in encoded["offset_mapping"]]
         if not input_ids or input_ids[-1] != tokenizer.eos_token_id:
@@ -196,7 +266,8 @@ def tokenize_examples(dataset: Dataset, tokenizer: Any, max_length: int) -> Data
 def main(args: argparse.Namespace) -> None:
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
     tokenizer.pad_token = tokenizer.pad_token or tokenizer.eos_token
-    rendered_dataset = render_examples(
+    render = render_trajectory_examples if args.full_trajectory else render_examples
+    rendered_dataset = render(
         load_records(args.traces, args.trace_dataset, args.trace_split), tokenizer, max_length=args.max_length
     )
     train_dataset = tokenize_examples(rendered_dataset, tokenizer, args.max_length)
@@ -273,6 +344,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--resume-from-checkpoint")
     parser.add_argument("--hub-model-id", help="Push the final adapter and checkpoints to this HF model repo")
     parser.add_argument("--no-4bit", action="store_true")
+    parser.add_argument(
+        "--full-trajectory",
+        action="store_true",
+        help="One example per trajectory with every assistant turn supervised (much less compute)",
+    )
     parser.add_argument("--fp16", action="store_true")
     return parser.parse_args()
 
