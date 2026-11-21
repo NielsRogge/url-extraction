@@ -169,7 +169,7 @@ def prelude(run: Run, rev: str, *, image_vllm: bool = False) -> str:
     lines = [
         "set -euo pipefail",
         "unset UV_OVERRIDE UV_INDEX_STRATEGY",
-        "command -v uv >/dev/null || python3 -m pip install -q uv",
+        "command -v uvx >/dev/null || python3 -m pip install -q uv  # uv and uvx (vLLM and the hf CLI run via uvx)",
         'export PATH="$HOME/.local/bin:$PATH"',
         # The agent itself runs `hf papers ...` inside OpenCode.
         "command -v hf >/dev/null || uv tool install -q 'huggingface-hub>=1.13'",

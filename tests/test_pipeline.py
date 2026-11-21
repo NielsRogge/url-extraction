@@ -128,3 +128,9 @@ def test_grpo_args_and_probe_tier_filter():
     train = built["grpo"][0].command
     assert train.index("--max-steps 100") < train.index("--max-steps 150")  # the last flag wins
     assert "--include-ids-file probe-ids.txt" in train
+
+
+def test_prelude_guarantees_uvx():
+    """The trl image has `uv` but no `uvx`; every job needs uvx (hf CLI, vLLM for GRPO and the probe)."""
+    _, built = jobs(["--teacher", "glm-5.2", "--student", "qwen3.5-4b", "--stages", "merge"])
+    assert "command -v uvx >/dev/null || python3 -m pip install -q uv" in built["merge"][0].command
