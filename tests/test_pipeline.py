@@ -44,7 +44,7 @@ def test_kimi_9b_jobs_match_the_old_pipeline_script():
     sft = built["sft"][0]
     assert sft.flavor == "h200" and "uv run train_sft.py" in sft.command and "--full-trajectory" in sft.command
     grpo = built["grpo"][0]
-    assert grpo.flavor == "h200x2" and "--include-ids-file rl-kimi-9b-ids.txt" in grpo.command
+    assert grpo.flavor == "h200x2" and "--include-ids-file scripts/rl-kimi-9b-ids.txt" in grpo.command
     assert "--max-concurrent-rollouts 16" in grpo.command and "--trainer trl" in grpo.command
     tags = {job.name.split("-eval-")[1]: job for job in built["eval"]}  # one job per (variant, split)
     assert set(tags) == {f"{v}-{s}" for v in ("sft", "grpo", "teacher") for s in ("test", "validation")}
@@ -134,3 +134,14 @@ def test_prelude_guarantees_uvx():
     """The trl image has `uv` but no `uvx`; every job needs uvx (hf CLI, vLLM for GRPO and the probe)."""
     _, built = jobs(["--teacher", "glm-5.2", "--student", "qwen3.5-4b", "--stages", "merge"])
     assert "command -v uvx >/dev/null || python3 -m pip install -q uv" in built["merge"][0].command
+
+
+def test_ids_file_is_passed_where_it_is_staged():
+    """Staging keeps repo-relative paths, so the trainer and the probe must get that same path."""
+    argv = ["--teacher", "glm-5.2", "--student", "qwen3.5-4b", "--stages", "probe,grpo", "--grpo-ids", "scripts/rl-v3-ids.txt"]
+    run, built = jobs(argv)
+    args = pipeline.parse_args(argv)
+    staged = {pipeline.staged_name(path) for path in pipeline.staged_paths(run, args)}
+    assert "scripts/rl-v3-ids.txt" in staged
+    assert "--include-ids-file scripts/rl-v3-ids.txt" in built["grpo"][0].command
+    assert "--include-ids-file scripts/rl-v3-ids.txt" in built["probe"][0].command

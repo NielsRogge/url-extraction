@@ -310,7 +310,7 @@ def probe_jobs(run: Run, rev: str, args: argparse.Namespace) -> list[Job]:
         if student.serve.vllm_extra_args:
             flags.append(f"--vllm-extra-args={q(student.serve.vllm_extra_args)}")
         select: list[str] = []
-        pool = Path(args.grpo_ids).name if args.grpo_ids and args.grpo_ids != "probe" else ""
+        pool = staged_name(args.grpo_ids) if args.grpo_ids and args.grpo_ids != "probe" else ""
         if args.probe_exclude_tiers:  # candidates: scoreable train papers outside these tiers (within the pool)
             select_flags = ["--dataset", q(run.dataset), "--split", "train", "--exclude-tiers", q(args.probe_exclude_tiers),
                             "--output", "probe-candidates.txt"] + (["--include-ids-file", pool] if pool else [])  # fmt: skip
@@ -376,7 +376,7 @@ def grpo_ids_steps(run: Run, args: argparse.Namespace) -> list[str]:
     if not args.grpo_ids:
         return []
     if args.grpo_ids != "probe":
-        return [Path(args.grpo_ids).name]
+        return [staged_name(args.grpo_ids)]
     return [
         f"{HF_CLI} download {q(run.eval_repo)} --repo-type dataset --include 'difficulty/{PROBE_TAG}/shard-*/qualified-ids.txt' "
         "--local-dir /work/probe >/dev/null",
@@ -459,6 +459,12 @@ def teacher_eval_job(run: Run, rev: str, split: str, args: argparse.Namespace) -
 # --------------------------------------------------------------------------------------------------
 
 
+def staged_name(path: str | Path) -> str:
+    """Where a local file lands in the job's /work: its repo-relative path, or its name if outside the repo."""
+    resolved = Path(path).resolve()
+    return str(resolved.relative_to(ROOT)) if resolved.is_relative_to(ROOT) else resolved.name
+
+
 def staged_paths(run: Run, args: argparse.Namespace) -> list[Path]:
     paths = [ROOT / name for name in STAGED_FILES]
     for package in STAGED_PACKAGES:
@@ -484,13 +490,13 @@ def stage_code(run: Run, args: argparse.Namespace) -> str:
     api.create_repo(run.code_repo, private=True, exist_ok=True)  # AGENTS.md: code snapshots stay private
     with tempfile.TemporaryDirectory() as tmp:
         for path in paths:
-            target = Path(tmp) / (path.relative_to(ROOT) if path.is_relative_to(ROOT) else path.name)
+            target = Path(tmp) / staged_name(path)
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(path, target)
         api.upload_folder(folder_path=tmp, path_in_repo=f"code/{rev}", repo_id=run.code_repo,
                           commit_message=f"Stage pipeline code {rev}")  # fmt: skip
     landed = set(api.list_repo_files(run.code_repo))
-    missing = [str(p) for p in paths if f"code/{rev}/{p.relative_to(ROOT) if p.is_relative_to(ROOT) else p.name}" not in landed]
+    missing = [str(p) for p in paths if f"code/{rev}/{staged_name(p)}" not in landed]
     if missing:
         raise RuntimeError(f"code staging did not land: {missing}")
     print(f"staged {len(paths)} files to {run.code_repo}@code/{rev}", flush=True)
