@@ -794,6 +794,8 @@ async def evaluate(args: argparse.Namespace, output_path: Path) -> None:
     done = completed_keys(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     models = [("base", args.base_model), ("adapter", "url-agent")] if args.adapter else [("base", args.base_model)]
+    if args.adapter and args.adapter_only:
+        models = [("adapter", "url-agent")]
 
     async with (
         opencode_server(str(args.opencode_binary)) as base_url,
@@ -988,6 +990,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tool-call-parser", default="qwen3_coder")
     parser.add_argument("--reasoning-parser", default="", help="e.g. 'inkling'; empty disables reasoning parsing")
     parser.add_argument("--max-lora-rank", type=int, default=32)
+    parser.add_argument("--adapter-only", action="store_true", help="Skip the base model (already evaluated)")
     parser.add_argument("--enforce-eager", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--language-model-only", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--vllm-extra-args", default="", help="Extra arguments appended to `vllm serve` (shell-quoted)")
