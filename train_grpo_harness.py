@@ -725,6 +725,11 @@ def train(args: argparse.Namespace) -> None:
         rollout_reward_fn=url_reward,
         peft_config=peft_config,
     )
+    if hasattr(trainer, "_lora_dir"):
+        # TRL (1.18) saves every adapter version it hot-loads into vLLM under <output_dir>/.vllm_lora, and the
+        # checkpoint pushes then upload them to the Hub repo. Keep them outside the output directory instead
+        # (vLLM runs on this machine and reads them by absolute path).
+        trainer._lora_dir = str(Path(args.scratch_dir or tempfile.gettempdir()).resolve() / "url-grpo-vllm-lora")
     trainer.train()
     trainer.save_model(args.output_dir)
     if args.hub_model_id:
