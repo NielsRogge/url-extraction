@@ -30,8 +30,8 @@ runner loads it without copying the credential into OpenCode's auth store. Its
 default teacher is `huggingface/zai-org/GLM-5.2`; override `--model` with any
 `provider/model` string shown by `opencode models`.
 
-To charge routed inference to a Team or Enterprise organization, also set
-`HF_BILL_TO=your-org-name` in `.env` (or pass `--hf-bill-to`). The harness adds
+Routed inference is billed to the `huggingface` organization by default; override
+it with `HF_BILL_TO=<org>` in `.env` (or pass `--hf-bill-to`). The harness adds
 the required `X-HF-Bill-To` header to OpenCode's Hugging Face provider without
 placing the token in its configuration. A fine-grained token must grant
 `inference.serverless.write` for that organization.
@@ -101,6 +101,7 @@ hf upload nielsr/paper-url-opencode-traces \
   --repo-type dataset
 
 hf jobs uv run \
+  --namespace huggingface \
   --image huggingface/trl \
   --flavor l4x1 \
   --timeout 8h \
@@ -134,6 +135,7 @@ adapter.
 
 ```bash
 hf jobs uv run \
+  --namespace huggingface \
   --image huggingface/trl \
   --flavor l4x1 \
   --timeout 4h \
@@ -181,6 +183,7 @@ Transformers checkpoint on a GPU Job:
 
 ```bash
 hf jobs uv run \
+  --namespace huggingface \
   --flavor l4x1 \
   --timeout 2h \
   --secrets HF_TOKEN \
@@ -208,7 +211,7 @@ Inference Endpoints in the target namespace.
 
 ```bash
 uv run deploy_endpoint.py
-hf endpoints describe qwen35-4b-url-agent-vllm --namespace nielsr
+hf endpoints describe qwen35-4b-url-agent-vllm --namespace huggingface
 ```
 
 Use the stable URL returned by `hf endpoints describe` with the production
@@ -291,6 +294,7 @@ Run that pinned wheel on a CPU Job:
 
 ```bash
 hf jobs run \
+  --namespace huggingface \
   --flavor cpu-upgrade \
   --timeout 2h \
   --secrets HF_TOKEN \
@@ -434,6 +438,7 @@ current two-GPU Jobs flavor is `a10g-largex2` (currently $3/hour total):
 
 ```bash
 hf jobs uv run \
+  --namespace huggingface \
   --image huggingface/trl \
   --flavor a10g-largex2 \
   --timeout 45m \
@@ -469,6 +474,7 @@ validated by TRL's upstream OpenCode example for an actual multi-step run:
 
 ```bash
 hf jobs uv run \
+  --namespace huggingface \
   --image huggingface/trl \
   --flavor a10g-largex2 \
   --timeout 8h \

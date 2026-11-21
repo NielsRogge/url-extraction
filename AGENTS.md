@@ -15,6 +15,14 @@ git fetch origin main
 git worktree add -b claude/new-feature ../url-extraction-new-feature origin/main
 ```
 
+## Hugging Face billing
+
+Always bill Hugging Face services to the `huggingface` org, never to a personal account:
+
+- **Inference Providers:** send the `X-HF-Bill-To: huggingface` header (for example `InferenceClient(bill_to="huggingface")`, or `HF_BILL_TO=huggingface` / `--hf-bill-to huggingface` for `generate_opencode_traces.py`).
+- **Jobs:** pass `--namespace huggingface` to `hf jobs run` / `hf jobs uv run`.
+- **Inference Endpoints:** create and manage them in the `huggingface` namespace (`--namespace huggingface`).
+
 ## Cleanup after release
 
 - Once the task's merged commit is live in production and its smoke checks pass, remove the task's worktree and delete its local and remote branch.
