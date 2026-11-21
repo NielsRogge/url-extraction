@@ -62,7 +62,7 @@ import tempfile
 import threading
 import time
 import urllib.request
-from contextlib import suppress
+from contextlib import nullcontext, suppress
 from pathlib import Path
 from typing import Any
 
@@ -822,6 +822,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--epsilon-high", type=float, default=0.28)
     parser.add_argument("--max-train-tokens", type=int, default=49152, help="simple trainer: longest trained sequence")
     parser.add_argument("--attention-chunk-size", type=int, default=1024)
+    parser.add_argument(
+        "--offload-activations", action=argparse.BooleanOptionalAction, default=True,
+        help="simple trainer: keep activations saved for backward in host memory",
+    )
     parser.add_argument("--vllm-extra-args", default="", help="Extra arguments appended to `vllm serve` (shell-quoted)")
     parser.add_argument("--log-rollouts", action="store_true", help="simple trainer: one diagnostic line per rollout")
     return parser.parse_args()
@@ -1050,13 +1054,19 @@ def train_simple(args: argparse.Namespace) -> None:
                 optimizer.zero_grad(set_to_none=True)
                 for advantage, chains in samples:
                     for ids, positions, old in chains:
-                        new = logprobs_of(ids, positions)
+                        # The looped model saves 48 layer applications (with their block-residual states) per
+                        # sequence for backward; keeping them in host memory bounds GPU memory to the weights
+                        # plus one layer's recomputation.
+                        offload = torch.autograd.graph.save_on_cpu(pin_memory=True) if args.offload_activations else nullcontext()
+                        with offload:
+                            new = logprobs_of(ids, positions)
                         old_t = torch.tensor(old, device=device)
                         ratio = torch.exp(new - old_t)
                         clipped = ratio.clamp(1 - args.epsilon, 1 + args.epsilon_high)
                         objective = torch.minimum(ratio * advantage, clipped * advantage)
                         loss = -objective.sum() / total_tokens
                         loss.backward()
+                        del new, ratio, clipped, objective
                         with torch.no_grad():
                             stats["loss"] += float(loss)
                             stats["ratio_sum"] += float(ratio.sum())
