@@ -211,8 +211,10 @@ def score_findings(row: dict[str, Any], findings: URLFindings) -> dict[str, Any]
             field_scores[name] = None
             continue
         predicted = canonical_url(getattr(findings, f"{name}_url"))
-        expected = canonical_url(row.get(f"reference_{name}_url"))
-        field_scores[name] = predicted == expected
+        # Validated datasets list other URLs for the same target (e.g. a renamed GitHub repo's redirect).
+        accepted = {canonical_url(row.get(f"reference_{name}_url"))}
+        accepted |= {canonical_url(alias) for alias in row.get(f"reference_{name}_aliases") or []}
+        field_scores[name] = predicted in accepted
     scoreable = [value for value in field_scores.values() if value is not None]
     return {
         "fields": field_scores,
