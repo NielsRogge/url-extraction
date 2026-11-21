@@ -42,7 +42,7 @@ from url_extraction_agent.research import (
 from url_extraction_agent.schema import PaperCandidate, ToolEvent, URLFindings
 
 DEFAULT_DATASET = "nielsr/paper-url-extraction-v1"
-DEFAULT_MODEL = "huggingface/zai-org/GLM-5.2"
+DEFAULT_MODEL = "huggingface/zai-org/GLM-5.3"
 ALLOWED_TOOLS = {"bash", "read", "grep", "glob", "webfetch"}
 OPENCODE_TOOLS = {
     "invalid",

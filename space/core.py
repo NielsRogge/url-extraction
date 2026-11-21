@@ -1,9 +1,7 @@
-"""Side-by-side race: a fine-tuned 4B URL agent vs. its frontier teacher, both inside real OpenCode.
+"""Race core: two OpenCode agents (fine-tuned student vs. frontier teacher) on the same paper.
 
-Enter an arXiv paper. Two OpenCode sessions start at the same time with the same system prompt,
-tools and structured-output schema used for training and evaluation. Each column streams that
-agent's reasoning and tool calls live, with elapsed time, tool count, tokens and cost, and the
-final URLs are checked against a reference.
+Shared by the web server. Each race starts one OpenCode server with two sessions that use the same
+system prompt, tools and structured-output schema as training and evaluation.
 
 Security: the agents run shell commands and read untrusted web pages, so they never see a
 credential. Model calls go to a local auth proxy in this process, which adds the token (and the
@@ -27,7 +25,6 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
-import gradio as gr
 import httpx
 import uvicorn
 from opencode_ai import AsyncOpencode
@@ -55,14 +52,25 @@ from evaluate_vllm import (
 # no child process (OpenCode, its shell tool) can inherit them.
 # --------------------------------------------------------------------------------------------------
 
-HF_TOKEN = os.environ.pop("HF_TOKEN", None) or os.environ.pop("HUGGING_FACE_HUB_TOKEN", None)
+def _read_token() -> str | None:
+    """The launcher hands the token over in a one-time file and strips it from every environment."""
+    path = Path(os.environ.pop("HF_TOKEN_FILE", "/tmp/.hf_token"))
+    token = None
+    if path.exists():
+        token = path.read_text().strip() or None
+        path.unlink(missing_ok=True)
+    return token or os.environ.pop("HF_TOKEN", None) or os.environ.pop("HUGGING_FACE_HUB_TOKEN", None)
+
+
+HF_TOKEN = _read_token()
 for _key in [k for k in os.environ if "TOKEN" in k.upper() or "SECRET" in k.upper()]:
     os.environ.pop(_key, None)
 BILL_TO = os.environ.get("HF_BILL_TO", "").strip() or None
-STUDENT_URL = os.environ.get("STUDENT_ENDPOINT_URL", "").rstrip("/")
-STUDENT_LABEL = os.environ.get("STUDENT_LABEL", "Qwen3.5-4B URL agent (SFT, 1× A10G)")
-STUDENT_GPU_PER_HOUR = float(os.environ.get("STUDENT_GPU_PER_HOUR", "1.00"))
-TEACHER_MODEL = os.environ.get("TEACHER_MODEL", "zai-org/GLM-5.2")
+# The student runs on this Space's own GPU (vLLM started by launch.py).
+STUDENT_URL = os.environ.get("STUDENT_URL", "http://127.0.0.1:8000").rstrip("/")
+STUDENT_LABEL = os.environ.get("STUDENT_LABEL", "Qwen3.5-4B · SFT + GRPO")
+STUDENT_GPU_PER_HOUR = float(os.environ.get("STUDENT_GPU_PER_HOUR", "0.80"))
+TEACHER_MODEL = os.environ.get("TEACHER_MODEL", "zai-org/GLM-5.3")
 TEACHER_ROUTER = "https://router.huggingface.co/v1"
 LABEL_DATASET = os.environ.get("LABEL_DATASET", "nielsr/paper-url-extraction-v1")
 
@@ -382,9 +390,28 @@ async def run_agent(client: AsyncOpencode, run: AgentRun, candidate: PaperCandid
     with suppress(Exception):
         run.messages = await raw_json(client, "get", f"/session/{session_id}/message")
     structured = (response.get("info") or {}).get("structured")
-    if structured is not None:
+    if structured is None:
+        # Fall back to the last StructuredOutput call OpenCode accepted.
+        for part in reversed(run.parts()):
+            if part.get("type") == "tool" and part.get("tool") == "StructuredOutput":
+                structured = (part.get("state") or {}).get("input")
+                break
+    if isinstance(structured, dict):
         with suppress(Exception):
             run.findings = URLFindings.model_validate(structured)
+        if run.findings is None:
+            # OpenCode accepted this answer; read its URLs leniently (missing reasoning, extra keys,
+            # URL strings with stray text) so the page shows what the agent actually answered.
+            def url(value: Any) -> str | None:
+                match = re.search(r"https?://\S+", str(value or ""))
+                return match.group(0).rstrip(").,;") if match else None
+
+            with suppress(Exception):
+                run.findings = URLFindings(
+                    reasoning=str(structured.get("reasoning") or ""),
+                    github_url=url(structured.get("github_url")),
+                    project_page_url=url(structured.get("project_page_url")),
+                )
     if run.findings is None:
         run.findings = findings_from_messages(run.messages)
     errors = [((m.get("info") or {}).get("error") or {}) for m in run.messages]
@@ -394,218 +421,3 @@ async def run_agent(client: AsyncOpencode, run: AgentRun, candidate: PaperCandid
     run.status, run.finished = "done", time.monotonic()
 
 
-# --------------------------------------------------------------------------------------------------
-# Rendering
-# --------------------------------------------------------------------------------------------------
-
-TOOL_ICONS = {"bash": "⌨️", "webfetch": "🌐", "read": "📄", "grep": "🔎", "glob": "🗂️", "StructuredOutput": "✅"}
-
-
-def esc(value: Any, limit: int | None = None) -> str:
-    text = str(value if value is not None else "")
-    if limit and len(text) > limit:
-        text = text[:limit] + f"\n… ({len(text) - limit:,} more characters)"
-    return html.escape(text)
-
-
-def tool_title(part: dict[str, Any]) -> str:
-    state = part.get("state") or {}
-    data = state.get("input") or {}
-    name = part.get("tool", "")
-    if name == "bash":
-        return data.get("command") or ""
-    if name == "webfetch":
-        return data.get("url") or ""
-    if name == "StructuredOutput":
-        return "final answer"
-    return json.dumps(data)[:200]
-
-
-def render_part(part: dict[str, Any], index: int) -> str:
-    if part.get("type") == "reasoning" and (part.get("text") or "").strip():
-        return f'<div class="thought">💭 {esc(part["text"].strip(), 400)}</div>'
-    if part.get("type") == "text" and (part.get("text") or "").strip():
-        return f'<div class="thought">💬 {esc(part["text"].strip(), 400)}</div>'
-    if part.get("type") != "tool":
-        return ""
-    state = part.get("state") or {}
-    status = state.get("status", "pending")
-    timing = state.get("time") or {}
-    duration = ""
-    if timing.get("start") and timing.get("end"):
-        duration = f"{(timing['end'] - timing['start']) / 1000:.1f}s"
-    badge = {"completed": "ok", "error": "err", "running": "run", "pending": "run"}.get(status, "run")
-    mark = {"ok": "✓", "err": "✗", "run": "…"}[badge]
-    name = part.get("tool", "")
-    if name == "StructuredOutput":
-        body = esc(json.dumps(state.get("input") or {}, indent=2), 1500)
-    else:
-        body = esc(state.get("output") or state.get("error") or "", 1500)
-    return (
-        f'<details class="call {badge}"><summary><span class="idx">{index}</span>'
-        f'<span class="icon">{TOOL_ICONS.get(name, "🔧")}</span><span class="tool">{esc(name)}</span>'
-        f'<code>{esc(tool_title(part), 160)}</code><span class="dur">{duration}</span>'
-        f'<span class="mark">{mark}</span></summary><pre>{body}</pre></details>'
-    )
-
-
-def verdict(predicted: str | None, expected: str | None) -> str:
-    if expected == "unknown":
-        return '<span class="na">no verified label</span>'
-    good = canonical_url(predicted) == canonical_url(expected)
-    return '<span class="good">✓ matches</span>' if good else f'<span class="bad">✗ expected {esc(expected or "none")}</span>'
-
-
-def render_column(run: AgentRun | None, reference: dict[str, Any] | None, winner: str | None) -> str:
-    if run is None:
-        return '<div class="col empty">Enter a paper and press <b>Race</b>.</div>'
-    tokens_in, tokens_out = run.tokens()
-    tool_count = len(run.tool_parts())
-    cost = run.cost()
-    cost_note = "router price" if run.side == "teacher" else "GPU time"
-    crown = " 🏁 finished first" if winner == run.side else ""
-    header = (
-        f'<div class="head {run.side}"><div class="name">{esc(run.label)}{crown}</div>'
-        f'<div class="stats"><span>⏱ {run.elapsed:.1f}s</span><span>🔧 {tool_count} tool calls</span>'
-        f'<span>🧮 {tokens_in:,} in (+{run.cached:,} cached) / {tokens_out:,} out</span><span>💲{cost:.4f} ({cost_note})</span></div></div>'
-    )
-    body = []
-    index = 0
-    for part in run.parts():
-        if part.get("type") == "tool":
-            index += 1
-        body.append(render_part(part, index))
-    if run.status == "waking":
-        body.append('<div class="thought pulse">Waking the student endpoint (scale-to-zero cold start, up to a few minutes)…</div>')
-    elif run.status == "waiting":
-        body.append('<div class="thought">Starting… (a scaled-to-zero endpoint can take a few minutes to wake up)</div>')
-    elif run.status == "running":
-        body.append('<div class="thought pulse">working…</div>')
-    result = ""
-    if run.status == "done":
-        if run.findings is not None:
-            rows = []
-            for name, label in (("github", "GitHub"), ("project_page", "Project page")):
-                value = getattr(run.findings, f"{name}_url")
-                link = f'<a href="{esc(value)}" target="_blank">{esc(value)}</a>' if value else "<i>none</i>"
-                check = verdict(value, (reference or {}).get(name)) if reference is not None else ""
-                rows.append(f"<tr><th>{label}</th><td>{link}</td><td>{check}</td></tr>")
-            result = f'<div class="result"><table>{"".join(rows)}</table><p>{esc(run.findings.reasoning, 600)}</p></div>'
-        if run.error:
-            result += f'<div class="error">{esc(run.error)}</div>'
-        if run.findings is None and not run.error:
-            result += '<div class="error">No structured answer.</div>'
-    return f'<div class="col">{header}<div class="timeline">{"".join(body)}</div>{result}</div>'
-
-
-CSS = """
-.col{border:1px solid var(--border-color-primary);border-radius:12px;padding:12px;min-height:420px;background:var(--background-fill-primary)}
-.col.empty{display:flex;align-items:center;justify-content:center;color:var(--body-text-color-subdued)}
-.head{border-radius:8px;padding:10px 12px;margin-bottom:10px;color:#fff}
-.head.student{background:linear-gradient(90deg,#ff9d00,#ff6a00)}.head.teacher{background:linear-gradient(90deg,#4f46e5,#7c3aed)}
-.head .name{font-weight:700;font-size:1.05em}.stats{display:flex;flex-wrap:wrap;gap:12px;font-size:.88em;margin-top:4px;opacity:.95}
-.timeline{display:flex;flex-direction:column;gap:6px}
-.call{border:1px solid var(--border-color-primary);border-left-width:4px;border-radius:8px;padding:2px 8px;background:var(--background-fill-secondary)}
-.call.ok{border-left-color:#16a34a}.call.err{border-left-color:#dc2626}.call.run{border-left-color:#f59e0b}
-.call summary{display:flex;align-items:center;gap:8px;cursor:pointer;padding:4px 0;list-style:none}
-.call summary code{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:.85em}
-.idx{font-size:.75em;color:var(--body-text-color-subdued);width:1.4em;text-align:right}.tool{font-weight:600;font-size:.88em}
-.dur{font-size:.8em;color:var(--body-text-color-subdued)}.mark{font-weight:700}
-.call pre{max-height:260px;overflow:auto;font-size:.78em;white-space:pre-wrap;word-break:break-word}
-.thought{font-size:.85em;color:var(--body-text-color-subdued);font-style:italic;padding:2px 6px}
-.pulse{animation:pulse 1.2s infinite}@keyframes pulse{50%{opacity:.35}}
-.result{margin-top:12px;border-radius:8px;padding:10px;background:var(--background-fill-secondary)}
-.result table{width:100%;font-size:.9em}.result th{text-align:left;width:7.5em}.result p{font-size:.85em;margin:.5em 0 0}
-.good{color:#16a34a;font-weight:600}.bad{color:#dc2626;font-weight:600}.na{color:var(--body-text-color-subdued)}
-.error{margin-top:8px;color:#dc2626;font-size:.85em}
-.paper{font-size:.92em}.paper b{font-size:1.05em}
-"""
-
-
-# --------------------------------------------------------------------------------------------------
-# Gradio
-# --------------------------------------------------------------------------------------------------
-
-
-async def race(paper: str):
-    arxiv_id = parse_arxiv_id(paper)
-    if not arxiv_id:
-        raise gr.Error("Enter an arXiv ID (e.g. 2604.12575) or an arxiv.org / huggingface.co/papers URL.")
-    try:
-        meta = await asyncio.to_thread(paper_metadata, arxiv_id)
-    except Exception as exc:  # noqa: BLE001
-        raise gr.Error(str(exc)) from exc
-    reference, source = reference_for(arxiv_id, meta)
-    candidate = PaperCandidate(
-        paper_id=0,
-        arxiv_id=arxiv_id,
-        title=meta["title"],
-        abstract=meta["abstract"],
-        missing_github=True,
-        missing_project_page=True,
-        priority=0,
-        priority_source="space",
-    )
-    info = (
-        f'<div class="paper"><b>{esc(meta["title"])}</b> · '
-        f'<a href="https://huggingface.co/papers/{arxiv_id}" target="_blank">{arxiv_id}</a><br>'
-        f"Both agents get the same prompt, tools and output schema. Checked against {esc(source)}.</div>"
-    )
-    student = AgentRun("student", STUDENT_LABEL, "student", "")
-    teacher = AgentRun("teacher", f"{TEACHER_MODEL} (frontier teacher, Inference Providers)", "teacher", TEACHER_MODEL)
-    yield info, render_column(student, reference, None), render_column(teacher, reference, None)
-
-    student.status = "waking"
-    yield info, render_column(student, reference, None), render_column(teacher, reference, None)
-    student.model = await asyncio.to_thread(student_model_id) or ""
-    student.status = "waiting"
-    workdir = Path(tempfile.mkdtemp(prefix="race-"))
-    process, base_url = await start_opencode(workdir, opencode_config(student.model or None))
-    try:
-        async with AsyncOpencode(base_url=base_url, timeout=httpx.Timeout(EPISODE_TIMEOUT + 60, connect=10)) as client:
-            tasks = [asyncio.create_task(run_agent(client, teacher, candidate))]
-            if student.model:
-                tasks.append(asyncio.create_task(run_agent(client, student, candidate)))
-            else:
-                student.status, student.error = "done", "Student endpoint is not configured or not reachable."
-            while not all(task.done() for task in tasks):
-                done = [r for r in (student, teacher) if r.status == "done" and r.findings]
-                winner = min(done, key=lambda r: r.elapsed).side if done else None
-                yield info, render_column(student, reference, winner), render_column(teacher, reference, winner)
-                await asyncio.sleep(0.6)
-            await asyncio.gather(*tasks, return_exceptions=True)
-    finally:
-        with suppress(ProcessLookupError, PermissionError):
-            os.killpg(process.pid, 15)
-        shutil.rmtree(workdir, ignore_errors=True)
-    finished = [r for r in (student, teacher) if r.findings is not None and r.finished]
-    winner = min(finished, key=lambda r: r.elapsed).side if finished else None
-    yield info, render_column(student, reference, winner), render_column(teacher, reference, winner)
-
-
-EXAMPLES = ["2604.12575", "2309.09958", "2604.11004", "2601.05851"]
-
-with gr.Blocks(title="Small agent vs. frontier teacher", css=CSS, theme=gr.themes.Soft()) as demo:
-    gr.Markdown(
-        "# 🏎️ Paper URL agent: fine-tuned 4B vs. frontier teacher\n"
-        "Both agents run in the unmodified **OpenCode** harness with the same tools, prompt and JSON schema. "
-        "The small model was distilled from the teacher's OpenCode traces (and optionally refined with GRPO through "
-        "OpenEnv). Enter an arXiv paper to watch them find its official **GitHub repo** and **project page**."
-    )
-    with gr.Row():
-        paper = gr.Textbox(label="arXiv ID or URL", placeholder="2604.12575", scale=4)
-        button = gr.Button("Race", variant="primary", scale=1)
-    gr.Examples(EXAMPLES, inputs=paper)
-    paper_info = gr.HTML()
-    with gr.Row(equal_height=False):
-        left = gr.HTML(render_column(None, None, None))
-        right = gr.HTML(render_column(None, None, None))
-    gr.Markdown(
-        f"Each agent may use at most {MAX_TOOL_CALLS} tool calls and {EPISODE_TIMEOUT:g} s. Teacher cost uses router "
-        "prices from models.dev; student cost is the A10G endpoint's GPU time for this request."
-    )
-    button.click(race, paper, [paper_info, left, right], concurrency_limit=2)
-    paper.submit(race, paper, [paper_info, left, right], concurrency_limit=2)
-
-if __name__ == "__main__":
-    demo.queue(max_size=8).launch()

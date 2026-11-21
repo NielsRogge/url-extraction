@@ -122,11 +122,9 @@ def merge(args: argparse.Namespace) -> Path:
     # the standalone merged repository can boot without reaching back to the
     # base model repository.
     AutoProcessor.from_pretrained(args.base_model).save_pretrained(output)
-    # The Hub rejects a local path as `base_model`; --card-base-model names the Hub model instead.
-    card_base = args.card_base_model or args.base_model
-    if args.hub_model_id and Path(card_base).exists():
-        raise ValueError(f"--card-base-model must be a Hub model id when --base-model is a local path ({card_base})")
-    (output / "README.md").write_text(model_card(card_base, args.adapter))
+    # The Hub only accepts repo ids as `base_model`; a local merge base (e.g. /model) gets the card's override.
+    card_base = args.card_base_model or (args.base_model if not Path(args.base_model).exists() else "Qwen/Qwen3.5-4B")
+    (output / "README.md").write_text(model_card(card_base, args.card_adapter or args.adapter))
 
     if not args.hub_model_id:
         print(f"Saved merged checkpoint to {output}; skipping Hub upload", flush=True)
@@ -151,7 +149,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hub-model-id", default=OUTPUT_REPO)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--max-shard-size", default="4GB")
-    parser.add_argument("--card-base-model", help="Hub model id for the model card when --base-model is a local path")
+    parser.add_argument("--card-base-model", help="Repo id to list as base_model in the model card")
+    parser.add_argument("--card-adapter", help="Repo id to link as the adapter in the model card")
     parser.add_argument("--public", dest="private", action="store_false")
     parser.set_defaults(private=True)
     return parser.parse_args()
