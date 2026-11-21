@@ -658,6 +658,12 @@ def start_vllm(args: argparse.Namespace) -> subprocess.Popen:
         command += ["--weight-transfer-config", '{"backend":"nccl"}']
     if args.reasoning_parser:
         command += ["--reasoning-parser", args.reasoning_parser]
+    if args.dspark:
+        # The checkpoint's bundled DSpark drafter (vLLM recipe); probabilistic drafting keeps the target distribution.
+        command += [
+            "--speculative-config",
+            '{"method":"dspark","num_speculative_tokens":7,"draft_sample_method":"probabilistic"}',
+        ]
     if args.vllm_extra_args:
         import shlex
 
@@ -826,6 +832,7 @@ def parse_args() -> argparse.Namespace:
         "--offload-activations", action=argparse.BooleanOptionalAction, default=True,
         help="simple trainer: keep activations saved for backward in host memory",
     )
+    parser.add_argument("--dspark", action="store_true", help="Serve with the checkpoint's DSpark speculative drafter")
     parser.add_argument("--vllm-extra-args", default="", help="Extra arguments appended to `vllm serve` (shell-quoted)")
     parser.add_argument("--log-rollouts", action="store_true", help="simple trainer: one diagnostic line per rollout")
     return parser.parse_args()
@@ -1066,13 +1073,13 @@ def train_simple(args: argparse.Namespace) -> None:
                         objective = torch.minimum(ratio * advantage, clipped * advantage)
                         loss = -objective.sum() / total_tokens
                         loss.backward()
-                        del new, ratio, clipped, objective
                         with torch.no_grad():
                             stats["loss"] += float(loss)
                             stats["ratio_sum"] += float(ratio.sum())
                             stats["ratio_max"] = max(stats["ratio_max"], float(ratio.max()))
                             stats["ratio_min"] = min(stats["ratio_min"], float(ratio.min()))
                             stats["clipped"] += int((ratio != clipped).sum())
+                        del new, ratio, clipped, objective, loss
                 grad_norm = float(torch.nn.utils.clip_grad_norm_(parameters, 1.0))
                 optimizer.step()
                 scheduler.step()
