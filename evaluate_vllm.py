@@ -821,8 +821,13 @@ async def evaluate(args: argparse.Namespace, output_path: Path) -> None:
                     record["evaluation_model"] = label
                     record["difficulty_tier"] = row.get("difficulty_tier")
                     record["served_model"] = model_id
+                    try:
+                        line = json.dumps(record, ensure_ascii=False)
+                        line.encode("utf-8")
+                    except UnicodeEncodeError:  # lone surrogates from tool output; escaped form is still valid JSON
+                        line = json.dumps(record)
                     with output_path.open("a") as handle:
-                        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+                        handle.write(line + "\n")
                         handle.flush()
                     print(
                         f"  complete={record['attempt_complete']} correct={record['verification']['all_scoreable_correct']} "

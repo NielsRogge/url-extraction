@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Score trace/evaluation JSONL files with evaluate_vllm.summarize: field accuracy, exact matches, tool calls.
 
-    python scripts/score_records.py [--rescore DATASET] FILE.jsonl [FILE.jsonl ...]
+    python scripts/score_records.py [--fully-scoreable] [--rescore DATASET] FILE.jsonl [FILE.jsonl ...]
+
+`--fully-scoreable` keeps only papers whose every requested field has a scoreable label (the default evaluation
+set; records from `--include-partial` runs also contain papers with an unverifiable field).
 
 `--rescore` recomputes each record's verification from its stored findings against DATASET's rows (e.g. the
 validated dataset with `reference_*_aliases`), using the current alias-aware `score_findings`.
@@ -40,6 +43,15 @@ def normalized(record: dict) -> dict:
 
 
 paths = sys.argv[1:]
+FULL_ONLY = "--fully-scoreable" in paths
+paths = [p for p in paths if p != "--fully-scoreable"]
+
+
+def fully_scoreable(record: dict) -> bool:
+    qualities = [q for q in (record.get("label_quality") or {}).values() if q is not None]
+    return bool(qualities) and all(q in SCOREABLE_QUALITIES for q in qualities)
+
+
 if paths and paths[0] == "--rescore":
     from datasets import load_dataset
 
@@ -51,6 +63,8 @@ for path in paths:
     records = [json.loads(line) for line in open(path)]
     if ROWS:
         records = [rescored(r) for r in records]
+    if FULL_ONLY:
+        records = [r for r in records if fully_scoreable(r)]
     labels = {record.get("evaluation_model") for record in records}
     for label in sorted(label for label in labels if label) or [None]:
         selected = [normalized(r) for r in records if label is None or r.get("evaluation_model") == label]
