@@ -19,7 +19,7 @@ SPACE=nielsr/url-agent-race
 case "${1:-}" in
 launch)
   REV=$(date +%Y%m%d-%H%M)
-  for f in train_grpo_harness.py evaluate_vllm.py merge_adapter.py; do
+  for f in train_grpo_harness.py evaluate_vllm.py trace_export.py merge_adapter.py; do
     hf buckets cp "$f" "hf://buckets/$BUCKET/url-grpo/code/$REV/$f" >/dev/null
   done
   # Prompt pool: train papers the teacher got wrong, skipped protocol on, or that have a verified project page.
