@@ -122,7 +122,7 @@ uvx --from 'huggingface-hub>=1.13' hf download $CODE_REPO --include 'code/$REV/*
 cp -r /work/stage/code/$REV/. /work/
 uv run --no-project --python 3.12 --with torch --with transformers==5.24.0 --with peft==0.22.0 --with accelerate==1.16.0 \
   --with huggingface-hub>=1.13.0 --with safetensors>=0.5.0 --with pillow --with torchvision \
-  python merge_adapter.py --base-model $MINI --adapter $ADAPTER --hub-model-id $OUT_REPO --output /merged $*
+  python merge_adapter.py --base-model $MINI --adapter $ADAPTER --hub-model-id $OUT_REPO --output /merged --public $*
 echo MERGE_DONE"
   hf jobs run --namespace "$NS" --name inkling-mini-merge --flavor cpu-xl --timeout 2h --secrets HF_TOKEN \
     --detach ghcr.io/astral-sh/uv:python3.12-bookworm -- bash -c "$CMD"
@@ -139,8 +139,8 @@ grpo)
     NAME=inkling-mini-grpo-test; TIMEOUT=1h
   else
     BODY="uvx --from 'huggingface-hub>=1.13' hf download $SFT_MERGED --local-dir /model >/dev/null
-\$TRAIN train_grpo_harness.py $GRPO_ARGS --model /model --max-steps 60 --prompts-per-step 2 --num-generations 8 --max-concurrent-rollouts 16 --save-steps 10 --output-dir /grpo-run --hub-model-id $GRPO_REPO $*
-\$TRAIN merge_adapter.py --base-model /model --adapter /grpo-run --hub-model-id $GRPO_MERGED --output /grpo-merged --card-base-model $MINI --card-adapter $GRPO_REPO"
+\$TRAIN train_grpo_harness.py $GRPO_ARGS --model /model --max-steps 60 --prompts-per-step 2 --num-generations 8 --max-concurrent-rollouts 16 --save-steps 10 --output-dir /grpo-run --hub-model-id $GRPO_REPO --public $*
+\$TRAIN merge_adapter.py --base-model /model --adapter /grpo-run --hub-model-id $GRPO_MERGED --output /grpo-merged --card-base-model $MINI --card-adapter $GRPO_REPO --public"
     NAME=inkling-mini-grpo; TIMEOUT=10h
   fi
   CMD="REV=$REV
