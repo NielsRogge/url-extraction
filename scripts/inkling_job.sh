@@ -37,7 +37,7 @@ mkdir -p /work && cd /work
 uvx --from "huggingface-hub>=1.13" hf download '"$CODE_REPO"' --include "code/$REV/*" --local-dir /work/stage >/dev/null
 cp -r /work/stage/code/$REV/. /work/ && ls /work
 LMO=--language-model-only; vllm serve --help=all 2>/dev/null | grep -q -- "--language-model-only" || LMO=--no-language-model-only
-EVAL="uv run --no-project --python 3.12 --with datasets>=4.0.0 --with httpx>=0.27.0 --with huggingface-hub>=1.13.0 --with opencode-ai==0.1.0a36 --with pydantic>=2.10.0,<2.13 --with python-dotenv>=1.1.0 --with safetensors>=0.4.0 python evaluate_vllm.py --vllm-binary $(command -v vllm) --tool-call-parser inkling --reasoning-parser inkling $LMO"
+EVAL="uv run --no-project --python 3.12 --python-preference only-managed --with torch --with datasets>=4.0.0 --with httpx>=0.27.0 --with huggingface-hub>=1.13.0 --with opencode-ai==0.1.0a36 --with pydantic>=2.10.0,<2.13 --with python-dotenv>=1.1.0 --with safetensors>=0.4.0 python evaluate_vllm.py --vllm-binary $(command -v vllm) --tool-call-parser inkling --reasoning-parser inkling $LMO"
 '
 
 case "${1:-}" in
