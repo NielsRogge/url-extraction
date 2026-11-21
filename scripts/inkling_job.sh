@@ -118,13 +118,13 @@ grpo)
   # GRPO_TEST=1 runs 2 tiny steps on the base model without merging or publishing.
   REV=${2:?REV}; shift 2
   TRAIN="uv run --no-project --python 3.12 --with torch --with transformers==5.24.0 --with trl==1.18.2 --with peft==0.22.0 --with accelerate==1.16.0 --with openenv==0.14.0 --with datasets>=4.0.0 --with httpx>=0.27.0 --with huggingface-hub>=1.13.0 --with opencode-ai==0.1.0a36 --with pydantic>=2.10.0,<2.13 --with safetensors>=0.4.0 --with aiohttp>=3.13.3 --with requests --with pillow --with torchvision python"
-  GRPO_ARGS="--launch --trainer simple --vllm-binary \$(command -v vllm) --tool-call-parser inkling --reasoning-parser inkling --include-ids-file rl-inkling-ids.txt --protocol-weight 0.5 --temperature 1.0 --lora-r 64 --max-completion-length 4096 --max-model-calls 16 --episode-timeout 180 --max-train-tokens 32768 --attention-chunk-size 512 --report-to none"
+  GRPO_ARGS="--launch --trainer simple --vllm-binary \$(command -v vllm) --tool-call-parser inkling --reasoning-parser inkling --include-ids-file rl-inkling-ids.txt --protocol-weight 0.5 --temperature 1.0 --lora-r 64 --max-completion-length 4096 --max-model-calls 24 --episode-timeout 300 --max-train-tokens 32768 --vllm-extra-args=--max-num-batched-tokens=32768 --attention-chunk-size 512 --report-to none"
   if [ -n "${GRPO_TEST:-}" ]; then
     BODY="\$TRAIN train_grpo_harness.py $GRPO_ARGS --model $MINI --max-steps 2 --prompts-per-step 2 --num-generations 4 --max-concurrent-rollouts 8 --output-dir /grpo-test --hub-model-id '' $*"
     NAME=inkling-mini-grpo-test; TIMEOUT=1h
   else
     BODY="\$TRAIN merge_adapter.py --base-model $MINI --adapter $SFT_REPO --hub-model-id $SFT_MERGED --output /model
-\$TRAIN train_grpo_harness.py $GRPO_ARGS --model /model --max-steps 100 --prompts-per-step 4 --num-generations 8 --max-concurrent-rollouts 32 --save-steps 10 --output-dir /grpo-run --hub-model-id $GRPO_REPO $*
+\$TRAIN train_grpo_harness.py $GRPO_ARGS --model /model --max-steps 60 --prompts-per-step 2 --num-generations 8 --max-concurrent-rollouts 16 --save-steps 10 --output-dir /grpo-run --hub-model-id $GRPO_REPO $*
 \$TRAIN merge_adapter.py --base-model /model --adapter /grpo-run --hub-model-id $GRPO_MERGED --output /grpo-merged --card-base-model $MINI --card-adapter $GRPO_REPO"
     NAME=inkling-mini-grpo; TIMEOUT=10h
   fi
