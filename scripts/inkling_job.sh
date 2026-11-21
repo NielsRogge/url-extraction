@@ -50,7 +50,7 @@ rev = sys.argv[1]
 api = HfApi()
 api.create_repo("nielsr/inkling-2-mini-url-agent-code", private=True, exist_ok=True)
 files = ["evaluate_vllm.py", "generate_opencode_traces.py", "train_sft.py", "merge_adapter.py", "difficulty_probe.py",
-         "train_grpo_harness.py", "inkling_train_patch.py", "inkling_adapter.py", "scripts/rl-v2-ids.txt"]
+         "train_grpo_harness.py", "inkling_train_patch.py", "inkling_adapter.py", "trace_export.py", "scripts/rl-v2-ids.txt"]
 files += ["scripts/rl-inkling-ids.txt"] + [f for f in sys.argv[2:]]
 for f in files:
     api.upload_file(path_or_fileobj=f, path_in_repo=f"code/{rev}/{f.split('/')[-1]}",
