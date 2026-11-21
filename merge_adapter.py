@@ -70,6 +70,7 @@ def verify_adapter_base(snapshot: Path, requested_base: str) -> None:
 
 
 def model_card(base_model: str, adapter: str) -> str:
+    title = base_model.split("/")[-1] if "/" in base_model else "Qwen3.5"
     return f"""---
 base_model: {base_model}
 library_name: transformers
@@ -80,10 +81,10 @@ tags:
 - merged
 ---
 
-# Qwen3.5 4B URL extraction agent
+# {title} URL extraction agent
 
 Standalone merged checkpoint of [{adapter}](https://huggingface.co/{adapter}),
-fine-tuned by supervised learning on verified OpenCode URL-extraction traces.
+fine-tuned on verified OpenCode URL-extraction traces.
 
 The model is intended to run inside the OpenCode harness with Bash, Read,
 Grep, Glob, WebFetch, and structured-output tools. See the source repository
