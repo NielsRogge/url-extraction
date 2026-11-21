@@ -34,12 +34,12 @@ from pathlib import Path
 from typing import Any
 
 README_HEAD_CHARS = 3000
-LIST_LIKE = re.compile(r"awesome|paper|survey|reading|list|daily|arxiv|collection|resources|notes|study|hub|blog", re.I)
+LIST_LIKE = re.compile(r"awesome|paper|survey|reading|list|daily|arxiv|collection|resources|notes|study|hub|blog", re.IGNORECASE)
 
 
 def gh(path: str) -> Any:
     for attempt in range(4):
-        result = subprocess.run(["gh", "api", "-X", "GET", path], capture_output=True, text=True)
+        result = subprocess.run(["gh", "api", "-X", "GET", path], capture_output=True, text=True, check=False)
         if result.returncode == 0:
             return json.loads(result.stdout)
         if "rate limit" in result.stderr.lower():
