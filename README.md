@@ -27,7 +27,8 @@ Put an inference-enabled Hugging Face token in `.env` as `HF_TOKEN`. Its
 fine-grained permission `Make calls to Inference Providers` must be assigned to
 your own user account, not only to an organization. The trace
 runner loads it without copying the credential into OpenCode's auth store. Its
-default teacher is `huggingface/zai-org/GLM-5.2`; override `--model` with any
+default teacher is `huggingface/zai-org/GLM-5.3` (the traces and results below were produced with
+GLM-5.2, its predecessor); override `--model` with any
 `provider/model` string shown by `opencode models`.
 
 To charge routed inference to a Team or Enterprise organization, also set
@@ -420,7 +421,7 @@ not that it beats it. Records and summaries:
 ### Demo Space: student vs. teacher, side by side
 
 [`nielsr/url-agent-race`](https://huggingface.co/spaces/nielsr/url-agent-race) (private, source in
-`space/`) races the fine-tuned student (Inference Endpoint, now 1x A10G) against GLM-5.2 on any arXiv
+`space/`) races the fine-tuned student (served on the Space's own GPU) against GLM-5.3 on any arXiv
 paper. Both run in real OpenCode with the evaluation prompt, tools and schema, and each column streams
 reasoning and tool calls with time, tokens and cost. The agents never see a credential: a local proxy
 attaches `HF_TOKEN` and the bill-to header. The Space needs an `HF_TOKEN` secret (scoped to Inference
