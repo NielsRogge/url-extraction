@@ -42,6 +42,8 @@ git push origin --delete claude/new-feature
 
 - Every artifact this project publishes on the Hugging Face Hub (models, adapters, datasets, trace and evaluation datasets, and Spaces) must be added to the project collection: https://huggingface.co/collections/nielsr/paper-url-agent-frontier-to-small-distillation-6b01c8378db0ff55d524014e
 - Add it when the repo is created, with a one-line note saying what it is (teacher, student, stage).
+- Visibility: models and datasets are public. Spaces, code snapshots (repos or buckets holding job code) and this GitHub repository stay private.
+- Before making a dataset public, scan it for credentials (`hf_`, `sk-`, `ghp_` tokens); `trace_export.py` redacts HF tokens in sessions.
 - Datasets holding agent episodes must also carry Pi-format sessions for the Hub's agent-traces viewer (see `trace_export.py`).
 
 Example:
