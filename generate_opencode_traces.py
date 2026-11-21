@@ -31,6 +31,7 @@ from huggingface_hub import get_token
 from opencode_ai import AsyncOpencode
 from pydantic import ValidationError
 
+from trace_export import publish_sessions, write_sessions
 from url_extraction_agent.research import (
     SYSTEM_PROMPT,
     derive_attempt_complete,
@@ -534,6 +535,8 @@ async def async_main(args: argparse.Namespace) -> None:
                     with args.output.open("a", encoding="utf-8") as handle:
                         handle.write(line + "\n")
                         handle.flush()
+                    if args.sessions_dir:  # one Pi-format session per episode, for the Hub's agent-traces viewer
+                        write_sessions([record], args.sessions_dir)
                     print(
                         f"  {row['arxiv_id']} attempt={attempt} accepted={record['accepted']} "
                         f"complete={record['attempt_complete']} score={record['verification']['fields']}",
@@ -549,6 +552,16 @@ async def async_main(args: argparse.Namespace) -> None:
         errors = [result for result in results if isinstance(result, BaseException)]
         if errors:
             raise RuntimeError(f"{len(errors)} row workers failed; rerun with resume enabled") from errors[0]
+    if args.output_repo:
+        from huggingface_hub import HfApi
+
+        api = HfApi()
+        api.create_repo(args.output_repo, repo_type="dataset", private=not args.public, exist_ok=True)
+        path_in_repo = args.path_in_repo or args.output.name
+        api.upload_file(path_or_fileobj=str(args.output), path_in_repo=path_in_repo, repo_id=args.output_repo,
+                        repo_type="dataset", commit_message=f"Add {path_in_repo}")  # fmt: skip
+        count = publish_sessions(api, args.output_repo, args.output, path_in_repo)
+        print(f"published {path_in_repo} and {count} agent-trace sessions to {args.output_repo}", flush=True)
 
 
 def parse_args() -> argparse.Namespace:
@@ -586,6 +599,14 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Research rows with at least one verified requested label; accept when every verified field matches",
     )
+    parser.add_argument(
+        "--sessions-dir",
+        type=Path,
+        help="Also write each episode as a Pi session file here (default: <output stem>.sessions/; '' disables)",
+    )
+    parser.add_argument("--output-repo", help="Upload the records and their agent-trace sessions to this dataset repo")
+    parser.add_argument("--path-in-repo", help="Records path in --output-repo (default: the --output file name)")
+    parser.add_argument("--public", action="store_true", help="Create --output-repo as public")
     parser.add_argument("--no-resume", action="store_false", dest="resume")
     parser.add_argument(
         "--resume-attempted",
@@ -606,4 +627,9 @@ def parse_args() -> argparse.Namespace:
 
 
 if __name__ == "__main__":
-    asyncio.run(async_main(parse_args()))
+    args = parse_args()
+    if args.sessions_dir is None:
+        args.sessions_dir = args.output.with_suffix(".sessions")
+    elif str(args.sessions_dir) in {"", "."}:
+        args.sessions_dir = None
+    asyncio.run(async_main(args))

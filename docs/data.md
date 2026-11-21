@@ -44,3 +44,13 @@ and project-page HTML; an LLM (GLM-5.3 by default) may only choose among those U
 resolve. HF metadata gives `gold` labels, adjudicated live URLs `silver`, and papers with no official URL
 anywhere `verified_null`. Mined rows are uploaded under `mined/` in the validated dataset.
 
+
+## Agent traces on the Hub
+
+Trace and evaluation datasets store one episode record per JSONL line (raw OpenCode messages, a portable
+chat trajectory, tool events and verification). `trace_export.py` also writes each episode as a
+Pi-format session file under `sessions/`, so the Hub's
+[agent-traces viewer](https://huggingface.co/docs/hub/en/agent-traces) shows the reasoning, tool calls
+and results, and the final verification of every episode. `generate_opencode_traces.py` and
+`evaluate_vllm.py` publish sessions automatically; `uv run trace_export.py --repo <dataset>` backfills an
+existing dataset.
