@@ -1,0 +1,19 @@
+# Inkling-2-Small pinned to DeepInfra: routed through Together or OpenRouter it often submits an empty
+# StructuredOutput({}) (16 and 7 of 42 test papers), which scores as no answer. Teacher of Inkling-2-Mini.
+name = "inkling-2-small"
+model = "thinkingmachines/Inkling-2-Small"
+opencode_model = "huggingface/thinkingmachines/Inkling-2-Small:deepinfra"
+provider = "deepinfra"
+notes = "1,215 accepted train traces from 1,726 papers (nielsr/inkling-2-mini-url-agent-traces), reasoning included"
+
+# A provider-pinned id is not in OpenCode's model catalog, so it is declared inline.
+[opencode_model_entry]
+name = "Inkling-2-Small (DeepInfra)"
+tool_call = true
+reasoning = true
+temperature = true
+limit = { context = 131072, output = 16384 }
+cost = { input = 0.30, output = 1.00 }  # USD per 1M tokens; without it OpenCode records $0
+
+[traces]
+concurrency = 6  # distillation; the test baseline uses baseline_concurrency (4)

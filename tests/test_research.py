@@ -4,7 +4,7 @@ import unittest
 
 from generate_opencode_traces import configure_huggingface_billing, findings_from_text, portable_trajectory
 from url_extraction_agent.research import canonical_url, derive_attempt_complete, score_findings
-from url_extraction_agent.schema import PaperCandidate, ToolEvent, URLFindings
+from harness.task import PaperCandidate, ToolEvent, URLFindings
 
 
 def test_configure_huggingface_billing(monkeypatch):

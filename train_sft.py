@@ -10,7 +10,12 @@
 #   "trl==1.9.2",
 # ]
 # ///
-"""QLoRA SFT for Qwen3.5 from verified OpenCode trajectories."""
+"""LoRA SFT of a student on verified OpenCode teacher trajectories.
+
+Defaults fit Qwen3.5; other students pass their profile's settings (`pipeline.py` does this): LoRA target
+modules, the model class to load, an optional training-time patch module, and whether the teacher's
+reasoning (`reasoning_content`) is distilled.
+"""
 
 from __future__ import annotations
 
@@ -138,10 +143,16 @@ def terminal_trajectory(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return result
 
 
+# Set from --keep-reasoning: distil the teacher's reasoning (rendered as thinking blocks by the chat template).
+KEEP_REASONING = False
+
+
 def normalized_messages(record: dict[str, Any]) -> list[dict[str, Any]]:
     messages = []
     for raw_message in terminal_trajectory(record["trajectory"]):
         message = copy.deepcopy(raw_message)
+        if not KEEP_REASONING:
+            message.pop("reasoning_content", None)
         if message.get("role") == "tool" and len(message.get("content", "")) > MAX_TOOL_CONTENT_CHARS:
             content = message["content"]
             message["content"] = content[:6_000] + "\n[tool output compacted for SFT]\n" + content[-2_000:]
@@ -152,6 +163,8 @@ def normalized_messages(record: dict[str, Any]) -> list[dict[str, Any]]:
         messages.append(message)
     return messages
 
+
+# Used by train_grpo_harness.train_simple (Inkling GRPO); SFT itself takes these settings from the profile.
 # Inkling 2 (inkling2_loop): attention-only LoRA. vLLM's Inkling2 LoRA can add deltas to routed experts only when
 # the experts are BF16, but its loader accepts only the checkpoint's NVFP4/MXFP8 experts, so expert adapters
 # cannot be served. The attention projections (q, k, v, o and the output gate) are served on the quantized
@@ -227,6 +240,8 @@ def render_examples(records: list[dict[str, Any]], tokenizer: Any, max_length: i
         history: list[dict[str, Any]] = []
         for raw_message in terminal_trajectory(record["trajectory"]):
             message = copy.deepcopy(raw_message)
+            if not KEEP_REASONING:
+                message.pop("reasoning_content", None)
             if message.get("role") == "tool" and len(message.get("content", "")) > MAX_TOOL_CONTENT_CHARS:
                 content = message["content"]
                 message["content"] = content[:6_000] + "\n[tool output compacted for SFT]\n" + content[-2_000:]
@@ -288,7 +303,34 @@ def tokenize_examples(dataset: Dataset, tokenizer: Any, max_length: int) -> Data
     return Dataset.from_list(rows)
 
 
+def lora_target_modules(value: str) -> Any:
+    """Comma-separated module names, or a regex (anything with regex metacharacters); default: Qwen3.5 text."""
+    if not value:
+        return TEXT_LORA_TARGET_MODULES
+    if any(char in value for char in "\\()[]|*+?^$"):
+        return value
+    return [name.strip() for name in value.split(",") if name.strip()]
+
+
+def load_model(args: argparse.Namespace) -> Any:
+    """Load the student with a profile-named model class (e.g. models SFTTrainer cannot instantiate itself)."""
+    import transformers
+
+    if args.train_patch:
+        from harness.hooks import resolve
+
+        resolve(args.train_patch).enable(chunk_size=args.attention_chunk_size)
+    model_class = getattr(transformers, args.model_class)
+    model = model_class.from_pretrained(args.model, dtype=torch.bfloat16 if not args.fp16 else torch.float16)
+    for config in (model.config, getattr(model.config, "text_config", None)):
+        if config is not None:
+            config.use_cache = False
+    return model
+
+
 def main(args: argparse.Namespace) -> None:
+    global KEEP_REASONING
+    KEEP_REASONING = args.keep_reasoning
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
     tokenizer.pad_token = tokenizer.pad_token or tokenizer.eos_token
     render = render_trajectory_examples if args.full_trajectory else render_examples
@@ -296,9 +338,8 @@ def main(args: argparse.Namespace) -> None:
         load_records(args.traces, args.trace_dataset, args.trace_split), tokenizer, max_length=args.max_length
     )
     train_dataset = tokenize_examples(rendered_dataset, tokenizer, args.max_length)
-    inkling = is_inkling(args.model)
     quantization = None
-    if not args.no_4bit and not inkling:
+    if not args.no_4bit:
         quantization = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_quant_type="nf4",
@@ -306,15 +347,14 @@ def main(args: argparse.Namespace) -> None:
             bnb_4bit_use_double_quant=True,
         )
     model: Any = args.model
-    target_modules: Any = TEXT_LORA_TARGET_MODULES
     model_init_kwargs: dict[str, Any] | None = {
         "torch_dtype": torch.bfloat16 if not args.fp16 else torch.float16,
         "trust_remote_code": True,
     }
-    if inkling:
-        model = load_inkling_model(args.model, args.attention_chunk_size)
-        target_modules = INKLING_LORA_TARGET_MODULES
-        model_init_kwargs = None
+    if args.model_class:
+        if quantization is not None:
+            raise ValueError("--model-class loads full-precision weights; pass --no-4bit")
+        model, model_init_kwargs = load_model(args), None
     trainer = SFTTrainer(
         model=model,
         processing_class=tokenizer,
@@ -328,7 +368,7 @@ def main(args: argparse.Namespace) -> None:
             # Qwen3.5ForConditionalGeneration also contains an unused vision
             # tower. Explicit text-module names keep the adapter compatible
             # with text-only vLLM and avoid storing inert visual LoRA tensors.
-            target_modules=target_modules,
+            target_modules=lora_target_modules(args.lora_target_modules),
         ),
         quantization_config=quantization,
         args=SFTConfig(
@@ -386,11 +426,14 @@ def parse_args() -> argparse.Namespace:
         help="One example per trajectory with every assistant turn supervised (much less compute)",
     )
     parser.add_argument("--fp16", action="store_true")
-    parser.add_argument("--public", action="store_true", help="Create the Hub repo as public (e.g. when private storage is full)")
+    parser.add_argument("--public", action="store_true", help="Create the Hub repo as public")
     parser.add_argument("--save-total-limit", type=int, default=None)
-    parser.add_argument(
-        "--attention-chunk-size", type=int, default=1024, help="Inkling 2 only: query chunk of the training attention"
-    )
+    # Student-profile settings (see profiles/students/*.toml).
+    parser.add_argument("--lora-target-modules", default="", help="Comma list or regex; default: Qwen3.5 text modules")
+    parser.add_argument("--model-class", default="", help="transformers class to load the student with, e.g. AutoModelForMultimodalLM")
+    parser.add_argument("--train-patch", default="", help="module whose enable(chunk_size=...) patches training attention")
+    parser.add_argument("--attention-chunk-size", type=int, default=1024, help="Query chunk for --train-patch")
+    parser.add_argument("--keep-reasoning", action="store_true", help="Distil the teacher's reasoning_content")
     return parser.parse_args()
 
 

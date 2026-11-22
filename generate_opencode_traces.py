@@ -1,4 +1,15 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.12"
+# dependencies = [
+#   "datasets>=4.0.0",
+#   "httpx>=0.27.0",
+#   "huggingface-hub>=1.13.0",
+#   "opencode-ai==0.1.0a36",
+#   "pydantic>=2.10.0,<2.13",
+#   "python-dotenv>=1.1.0",
+# ]
+# ///
 """Generate verified URL-research trajectories with the OpenCode Python SDK.
 
 Run an existing server with ``--base-url`` or let this script launch one in an
@@ -13,14 +24,6 @@ import argparse
 import asyncio
 import json
 import os
-import re
-import shutil
-import socket
-import subprocess
-import tempfile
-import time
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Any
 
@@ -29,48 +32,27 @@ from datasets import load_dataset
 from dotenv import load_dotenv
 from huggingface_hub import get_token
 from opencode_ai import AsyncOpencode
-from pydantic import ValidationError
 
-from trace_export import publish_sessions, write_sessions
-from url_extraction_agent.research import (
-    SYSTEM_PROMPT,
-    derive_attempt_complete,
-    findings_json_schema,
-    json_text,
-    score_findings,
-    user_prompt,
+from harness.opencode import (  # noqa: F401 - re-exported for tests and older imports
+    ALLOWED_TOOLS,
+    OPENCODE_TOOLS,
+    find_or_install_opencode,
+    findings_from_messages,
+    findings_from_text,
+    opencode_server,
+    portable_trajectory,
+    raw_json,
+    record_line,
+    tool_events,
 )
-from url_extraction_agent.schema import PaperCandidate, ToolEvent, URLFindings
-
-# Credentials an agent can print from its environment (e.g. `env | grep HF`); never written to records.
-CREDENTIAL_RE = re.compile(r"\b(?:hf_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9_-]{20,}|ghp_[A-Za-z0-9]{20,})")
-
-
-def redact_credentials(text: str) -> str:
-    return CREDENTIAL_RE.sub(lambda match: match.group(0)[:3] + "***REDACTED***", text)
+from harness.opencode import run_one as run_episode
+from harness.scoring import SCOREABLE_QUALITIES, fully_scoreable, partly_scoreable
+from harness.task import candidate_from_row  # noqa: F401
+from trace_export import publish_sessions, write_sessions
 
 DEFAULT_DATASET = "nielsr/paper-url-extraction-v1"
 DEFAULT_MODEL = "huggingface/zai-org/GLM-5.3"
-ALLOWED_TOOLS = {"bash", "read", "grep", "glob", "webfetch"}
-OPENCODE_TOOLS = {
-    "invalid",
-    "question",
-    "bash",
-    "read",
-    "glob",
-    "grep",
-    "edit",
-    "write",
-    "task",
-    "webfetch",
-    "todowrite",
-    "websearch",
-    "codesearch",
-    "skill",
-    "apply_patch",
-}
-SCORED_QUALITIES = {"gold", "silver", "verified_null"}
-MAX_PORTABLE_TOOL_OUTPUT_CHARS = 8_000
+SCORED_QUALITIES = SCOREABLE_QUALITIES
 
 
 def split_model(value: str) -> tuple[str, str]:
@@ -146,355 +128,45 @@ def cached_hf_cli_token() -> str | None:
         os.environ.update(saved)
 
 
-def candidate_from_row(row: dict[str, Any]) -> PaperCandidate:
-    return PaperCandidate(
-        paper_id=int(row["paper_id"]),
-        arxiv_id=str(row["arxiv_id"]),
-        title=str(row["title"]),
-        abstract=str(row["abstract"]),
-        missing_github=bool(row["missing_github"]),
-        missing_project_page=bool(row["missing_project_page"]),
-        known_github_url=row.get("known_github_url"),
-        known_project_page_url=row.get("known_project_page_url"),
-        priority=int(row.get("priority", 0)),
-        priority_source=str(row.get("priority_source", "dataset")),
-    )
-
-
-def requested_qualities(row: dict[str, Any]) -> list[Any]:
-    return [row.get(f"{name}_label_quality") for name in ("github", "project_page") if bool(row[f"missing_{name}"])]
-
-
 def row_all_requested_scoreable(row: dict[str, Any]) -> bool:
-    qualities = requested_qualities(row)
-    return bool(qualities) and all(quality in SCORED_QUALITIES for quality in qualities)
+    return fully_scoreable(row)
 
 
 def row_any_requested_scoreable(row: dict[str, Any]) -> bool:
-    return any(quality in SCORED_QUALITIES for quality in requested_qualities(row))
+    return partly_scoreable(row)
 
 
 # Set from --accept-partial: also accept rows where only some requested fields have verified labels.
 ACCEPT_PARTIAL = False
 
 
-def tool_events(messages: list[dict[str, Any]]) -> list[ToolEvent]:
-    events: list[ToolEvent] = []
-    for message in messages:
-        for part in message.get("parts", []):
-            if part.get("type") != "tool":
-                continue
-            state = part.get("state") or {}
-            status = state.get("status")
-            events.append(
-                ToolEvent(
-                    tool_name=str(part.get("tool", "")),
-                    tool_input=state.get("input") or {},
-                    success=status == "completed",
-                    error=state.get("error"),
-                    response=state.get("output"),
-                )
-            )
-    return events
-
-
-def portable_trajectory(messages: list[dict[str, Any]], final: URLFindings | None) -> list[dict[str, Any]]:
-    """Convert OpenCode parts into ordered OpenAI-style chat messages."""
-    result: list[dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT}]
-    for message in messages:
-        info = message.get("info") or {}
-        role = info.get("role")
-        if role == "user":
-            text = "\n".join(part.get("text", "") for part in message.get("parts", []) if part.get("type") == "text")
-            if text:
-                result.append({"role": "user", "content": text})
-            continue
-        if role != "assistant":
-            continue
-        text_parts: list[str] = []
-        # The teacher's reasoning is kept as `reasoning_content` on the assistant message that follows it
-        # (the field chat templates such as Inkling 2's and Qwen3.5's render as a thinking block).
-        reasoning_parts: list[str] = []
-
-        def assistant(content: str, **extra: Any) -> dict[str, Any]:
-            entry: dict[str, Any] = {"role": "assistant", "content": content, **extra}
-            if reasoning_parts:
-                entry["reasoning_content"] = "\n\n".join(reasoning_parts)
-                reasoning_parts.clear()
-            return entry
-
-        for part in message.get("parts", []):
-            if part.get("type") == "reasoning" and str(part.get("text") or "").strip():
-                reasoning_parts.append(str(part["text"]).strip())
-            elif part.get("type") == "text" and part.get("text"):
-                text_parts.append(str(part["text"]))
-            elif part.get("type") == "tool":
-                if text_parts:
-                    result.append(assistant("\n".join(text_parts)))
-                    text_parts.clear()
-                state = part.get("state") or {}
-                call_id = str(part.get("callID") or part.get("id"))
-                result.append(
-                    assistant(
-                        "",
-                        tool_calls=[
-                            {
-                                "id": call_id,
-                                "type": "function",
-                                "function": {
-                                    "name": str(part.get("tool", "")),
-                                    "arguments": json_text(state.get("input") or {}),
-                                },
-                            }
-                        ],
-                    )
-                )
-                output = str(state.get("output") if state.get("status") == "completed" else state.get("error") or "")
-                if len(output) > MAX_PORTABLE_TOOL_OUTPUT_CHARS:
-                    output = (
-                        output[:MAX_PORTABLE_TOOL_OUTPUT_CHARS] + "\n[tool output truncated in portable trajectory]"
-                    )
-                result.append({"role": "tool", "tool_call_id": call_id, "content": output})
-        if text_parts or reasoning_parts:
-            result.append(assistant("\n".join(text_parts)))
-    used_structured_output = any(
-        call.get("function", {}).get("name", "").lower() == "structuredoutput"
-        for message in result
-        for call in message.get("tool_calls", [])
-    )
-    if final is not None and not used_structured_output:
-        final_text = final.model_dump_json(exclude_none=False)
-        existing_final = None
-        if result and result[-1].get("role") == "assistant" and isinstance(result[-1].get("content"), str):
-            existing_final = findings_from_text(result[-1]["content"])
-        if existing_final != final:
-            result.append({"role": "assistant", "content": final_text})
-    return result
-
-
-def findings_from_text(text: str) -> URLFindings | None:
-    candidates = [text.strip()]
-    candidates.extend(re.findall(r"```(?:json)?\s*(\{.*?\})\s*```", text, flags=re.DOTALL | re.IGNORECASE))
-    match = re.search(r"\{.*\}", text, flags=re.DOTALL)
-    if match:
-        candidates.append(match.group(0))
-    for candidate in candidates:
-        try:
-            return URLFindings.model_validate_json(candidate)
-        except (ValueError, TypeError):
-            pass
-    return None
-
-
-def findings_from_messages(messages: list[dict[str, Any]]) -> URLFindings | None:
-    """Parse a JSON-only final answer when provider-native schema output is unavailable."""
-    texts = [
-        str(part.get("text", ""))
-        for message in messages
-        if (message.get("info") or {}).get("role") == "assistant"
-        for part in message.get("parts", [])
-        if part.get("type") == "text" and part.get("text")
-    ]
-    for text in reversed(texts):
-        findings = findings_from_text(text)
-        if findings is not None:
-            return findings
-    return None
-
-
-async def raw_json(client: AsyncOpencode, method: str, path: str, body: dict[str, Any] | None = None) -> Any:
-    request = getattr(client, method)
-    kwargs: dict[str, Any] = {"cast_to": httpx.Response}
-    if body is not None:
-        kwargs["body"] = body
-    response = await request(path, **kwargs)
-    response.raise_for_status()
-    return response.json()
-
-
-def free_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
-
-
-@asynccontextmanager
-async def opencode_server(base_url: str | None, command: str) -> AsyncIterator[str]:
-    if base_url:
-        yield base_url.rstrip("/")
+def configure_model_entry(model: tuple[str, str], entry: dict[str, Any] | None) -> None:
+    """Declare `model` in OpenCode's inline config, e.g. a provider-pinned id such as `org/model:deepinfra`."""
+    if not entry:
         return
-    executable = shutil.which(command)
-    if not executable:
-        raise RuntimeError(f"OpenCode executable not found: {command}")
-    port = free_port()
-    workspace = tempfile.TemporaryDirectory(prefix="url-traces-")
-    process = subprocess.Popen(  # noqa: ASYNC220 - startup is immediate; process remains asynchronous
-        [executable, "serve", "--hostname", "127.0.0.1", "--port", str(port)],
-        cwd=workspace.name,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.STDOUT,
-    )
-    url = f"http://127.0.0.1:{port}"
-    try:
-        async with httpx.AsyncClient() as health:
-            for _ in range(100):
-                if process.poll() is not None:
-                    raise RuntimeError(f"OpenCode exited during startup with status {process.returncode}")
-                try:
-                    response = await health.get(f"{url}/global/health", timeout=1)
-                    if response.is_success:
-                        break
-                except httpx.HTTPError:
-                    pass
-                await asyncio.sleep(0.1)
-            else:
-                raise TimeoutError("OpenCode did not become healthy within 10 seconds")
-        yield url
-    finally:
-        process.terminate()
-        try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            process.kill()
-        workspace.cleanup()
+    config = json.loads(os.environ.get("OPENCODE_CONFIG_CONTENT", "{}") or "{}")
+    models = config.setdefault("provider", {}).setdefault(model[0], {}).setdefault("models", {})
+    models[model[1]] = {**models.get(model[1], {}), **entry}
+    os.environ["OPENCODE_CONFIG_CONTENT"] = json.dumps(config)
 
 
 async def run_one(
-    client: AsyncOpencode,
+    client: Any,
     row: dict[str, Any],
     model: tuple[str, str],
     *,
     episode_timeout: float,
     max_tool_calls: int,
 ) -> dict[str, Any]:
-    candidate = candidate_from_row(row)
-    started = time.monotonic()
-    session = await raw_json(
-        client,
-        "post",
-        "/session",
-        {
-            "title": f"URL trace {candidate.arxiv_id}",
-            "permission": [
-                {"permission": "*", "pattern": "*", "action": "allow"},
-                {"permission": "external_directory", "pattern": "*", "action": "deny"},
-                {"permission": "doom_loop", "pattern": "*", "action": "deny"},
-            ],
-        },
-    )
-    session_id = session["id"]
-    failure: str | None = None
-    response: dict[str, Any] = {}
-    watchdog_reason: str | None = None
-
-    async def watchdog() -> None:
-        nonlocal watchdog_reason
-        while True:
-            await asyncio.sleep(2)
-            current = await raw_json(client, "get", f"/session/{session_id}/message")
-            calls = sum(part.get("type") == "tool" for message in current for part in message.get("parts", []))
-            if calls >= max_tool_calls:
-                watchdog_reason = f"tool-call limit reached ({max_tool_calls})"
-                await raw_json(client, "post", f"/session/{session_id}/abort")
-                return
-
-    watchdog_task = asyncio.create_task(watchdog())
-    try:
-        async with asyncio.timeout(episode_timeout):
-            response = await raw_json(
-                client,
-                "post",
-                f"/session/{session_id}/message",
-                {
-                    "model": {"providerID": model[0], "modelID": model[1]},
-                    "system": SYSTEM_PROMPT,
-                    "tools": {name: name in ALLOWED_TOOLS for name in OPENCODE_TOOLS},
-                    "format": {"type": "json_schema", "schema": findings_json_schema(), "retryCount": 2},
-                    "parts": [{"type": "text", "text": user_prompt(candidate)}],
-                },
-            )
-            if (response.get("info") or {}).get("error"):
-                response = await raw_json(
-                    client,
-                    "post",
-                    f"/session/{session_id}/message",
-                    {
-                        "model": {"providerID": model[0], "modelID": model[1]},
-                        "system": SYSTEM_PROMPT,
-                        "tools": {name: name in ALLOWED_TOOLS for name in OPENCODE_TOOLS},
-                        "parts": [
-                            {
-                                "type": "text",
-                                "text": (
-                                    "The provider rejected native structured output. Complete the research task above "
-                                    "and return only one JSON object with reasoning, github_url, and project_page_url."
-                                ),
-                            }
-                        ],
-                    },
-                )
-    except TimeoutError:
-        failure = f"episode timed out after {episode_timeout:g} seconds"
-        with suppress(Exception):
-            await raw_json(client, "post", f"/session/{session_id}/abort")
-    except Exception as exc:  # noqa: BLE001 - preserve failed provider attempts for diagnosis and resumption
-        failure = f"{type(exc).__name__}: {exc}"
-    finally:
-        watchdog_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await watchdog_task
-    failure = failure or watchdog_reason
-    messages = await raw_json(client, "get", f"/session/{session_id}/message")
-    provider_errors = [
-        ((message.get("info") or {}).get("error") or {}).get("data", {}).get("message") for message in messages
-    ]
-    provider_errors = [message for message in provider_errors if message]
-    if provider_errors:
-        failure = failure or f"provider error: {provider_errors[-1]}"
-    events = tool_events(messages)
-    findings: URLFindings | None = None
-    structured = (response.get("info") or {}).get("structured")
-    if structured is not None:
-        try:
-            findings = URLFindings.model_validate(structured)
-        except ValidationError as exc:
-            failure = failure or f"invalid structured output: {exc}"
-    if findings is None:
-        findings = findings_from_messages(messages)
-    complete, incomplete_reason = (False, "no valid structured output")
-    if findings is not None:
-        complete, incomplete_reason = derive_attempt_complete(candidate, findings, events)
-    if len(events) >= max_tool_calls:
-        complete, incomplete_reason = False, f"tool-call limit reached ({max_tool_calls})"
-    scoring = (
-        score_findings(row, findings)
-        if findings is not None
-        else {"fields": {}, "num_scoreable": 0, "all_scoreable_correct": False}
+    """One teacher episode, scored by the shared harness; `accepted` decides whether it is an SFT example."""
+    record = await run_episode(
+        client, row, model, episode_timeout=episode_timeout, max_tool_calls=max_tool_calls, title="URL trace"
     )
     all_requested_scoreable = row_all_requested_scoreable(row)
-    label_ok = all_requested_scoreable or (ACCEPT_PARTIAL and scoring["num_scoreable"] > 0)
-    accepted = findings is not None and complete and label_ok and scoring["all_scoreable_correct"]
-    return {
-        "version": 1,
-        "paper_id": candidate.paper_id,
-        "arxiv_id": candidate.arxiv_id,
-        "model": f"{model[0]}/{model[1]}",
-        "session_id": session_id,
-        "elapsed_seconds": round(time.monotonic() - started, 3),
-        "accepted": accepted,
-        "attempt_complete": complete,
-        "failure_reason": failure or incomplete_reason,
-        "findings": findings.model_dump(mode="json") if findings else None,
-        "verification": scoring,
-        "all_requested_scoreable": all_requested_scoreable,
-        "label_quality": {
-            "github": row.get("github_label_quality"),
-            "project_page": row.get("project_page_label_quality"),
-        },
-        "tool_events": [event.model_dump(mode="json") for event in events],
-        "trajectory": portable_trajectory(messages, findings),
-        "opencode_messages": messages,
-    }
+    label_ok = all_requested_scoreable or (ACCEPT_PARTIAL and record["verification"]["num_scoreable"] > 0)
+    record["accepted"] = bool(record["accepted"] and label_ok)
+    record["all_requested_scoreable"] = all_requested_scoreable
+    return record
 
 
 def accepted_ids(path: Path, *, any_attempt: bool = False) -> set[int]:
@@ -516,6 +188,8 @@ async def async_main(args: argparse.Namespace) -> None:
     model = split_model(args.model)
     validate_huggingface_token(model, args.hf_bill_to)
     configure_huggingface_billing(model, args.hf_bill_to)
+    configure_model_entry(model, json.loads(args.opencode_model_entry) if args.opencode_model_entry else None)
+    opencode_command = args.opencode_command if args.base_url else find_or_install_opencode(args.opencode_command)
     dataset = load_dataset(args.dataset, split=args.split)
     rows = [dict(row) for row in dataset]
     global ACCEPT_PARTIAL
@@ -525,11 +199,14 @@ async def async_main(args: argparse.Namespace) -> None:
     elif not args.include_unscoreable:
         rows = [row for row in rows if row_all_requested_scoreable(row)]
     rows = rows[args.start : args.start + args.limit]
+    if args.shard:  # disjoint slices for parallel workers / jobs
+        index, count = (int(value) for value in args.shard.split("/"))
+        rows = rows[index::count]
     done = accepted_ids(args.output, any_attempt=args.resume_attempted) if args.resume else set()
     rows = [row for row in rows if int(row["paper_id"]) not in done]
     args.output.parent.mkdir(parents=True, exist_ok=True)
     async with (
-        opencode_server(args.base_url, args.opencode_command) as base_url,
+        opencode_server(opencode_command, base_url=args.base_url) as base_url,
         AsyncOpencode(base_url=base_url, timeout=httpx.Timeout(args.timeout, connect=10), max_retries=1) as client,
     ):
         semaphore = asyncio.Semaphore(args.concurrency)
@@ -546,14 +223,11 @@ async def async_main(args: argparse.Namespace) -> None:
                         max_tool_calls=args.max_tool_calls,
                     )
                     record["attempt"] = attempt
-                    try:
-                        line = json.dumps(record, ensure_ascii=False)
-                        line.encode("utf-8")
-                    except UnicodeEncodeError:  # lone surrogates from tool output; escaped form is still valid JSON
-                        line = json.dumps(record)
+                    if args.evaluation_label:  # e.g. "teacher": a teacher baseline in the evaluator's summary
+                        record["evaluation_model"] = args.evaluation_label
+                        record["difficulty_tier"] = row.get("difficulty_tier")
                     with args.output.open("a", encoding="utf-8") as handle:
-                        # OpenCode needs HF_TOKEN for Inference Providers, so the agent's shell can see it: redact.
-                        handle.write(redact_credentials(line) + "\n")
+                        handle.write(record_line(record))
                         handle.flush()
                     if args.sessions_dir:  # one Pi-format session per episode, for the Hub's agent-traces viewer
                         write_sessions([record], args.sessions_dir)
@@ -590,6 +264,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--split", default="train")
     parser.add_argument("--start", type=int, default=0)
     parser.add_argument("--limit", type=int, default=10)
+    parser.add_argument("--shard", help="i/n: keep every n-th selected row starting at i (parallel workers)")
     parser.add_argument("--output", type=Path, default=Path("artifacts/traces/train.jsonl"))
     parser.add_argument("--model", help=f"OpenCode PROVIDER/MODEL (default: {DEFAULT_MODEL})")
     parser.add_argument("--env-file", type=Path, default=Path(".env"), help="Load provider credentials from this file")
@@ -603,7 +278,12 @@ def parse_args() -> argparse.Namespace:
         help="HF organization to bill (or set HF_BILL_TO; default: huggingface)",
     )
     parser.add_argument("--base-url", help="Attach to an existing `opencode serve` instance")
-    parser.add_argument("--opencode-command", default="opencode")
+    parser.add_argument("--opencode-command", default="opencode", help="Installed automatically if not on PATH")
+    parser.add_argument(
+        "--opencode-model-entry",
+        help="JSON model entry added to OpenCode's inline config for --model (needed for provider-pinned ids)",
+    )
+    parser.add_argument("--evaluation-label", help="Store as evaluation_model (e.g. 'teacher' for a baseline run)")
     parser.add_argument("--timeout", type=float, default=600)
     parser.add_argument("--episode-timeout", type=float, default=180)
     parser.add_argument("--max-tool-calls", type=int, default=20)

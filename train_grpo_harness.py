@@ -37,8 +37,11 @@ and OpenEnv pin incompatible `mcp` majors; the trainer talks to it only over HTT
 The URL task needs no sandbox: OpenCode only reads public web pages and runs `hf papers`, so each
 rollout runs locally in its own temporary workspace with its own OpenCode database.
 
-Reward: fraction of verified URL fields that are correct (0 without a structured answer), plus a
-small tool-efficiency bonus `0.1 * (1 - tool_calls / 15)` only when every verified field is correct.
+Reward (`harness.scoring`, the same `score_episode` the evaluator records): fraction of verified URL fields
+that are correct (0 without a structured answer), with `--protocol-weight` of that credit withheld when the
+episode is incomplete (research protocol skipped or `--max-tool-calls` reached), plus a small tool-efficiency
+bonus `0.1 * (1 - tool_calls / 15)` only on full credit (every verified field correct and, with a protocol
+weight, a complete episode).
 
 Run on a two-GPU node with `--launch` (starts vLLM on GPU 0, the trainer on GPU 1).
 """
@@ -52,7 +55,6 @@ import json
 import logging
 import os
 import random
-import re
 import shutil
 import signal
 import socket
@@ -70,21 +72,24 @@ import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from evaluate_vllm import (  # noqa: E402 - shared harness definition with the evaluator
-    ALLOWED_TOOLS,
-    OPENCODE_TOOLS,
-    SCOREABLE_QUALITIES,
-    SYSTEM_PROMPT,
-    URLFindings,
-    candidate_from_row,
-    derive_attempt_complete,
-    findings_from_messages,
-    install_opencode,
+from harness.opencode import (  # noqa: E402 - the shared harness (same episode code as the evaluator)
+    SESSION_PERMISSIONS,
+    find_or_install_opencode,
+    message_body,
+    parse_findings,
     raw_json,
-    score_findings,
     tool_events,
-    user_prompt,
 )
+from harness.scoring import (  # noqa: E402
+    TOOL_BUDGET,  # noqa: F401 - re-exported
+    W_TOOL_EFFICIENCY,  # noqa: F401 - re-exported
+    env_reward,
+    partly_scoreable,
+    score_episode,
+    shortcut_violation,
+    tool_efficiency_bonus,
+)
+from harness.task import URLFindings, candidate_from_row, user_prompt  # noqa: E402
 
 logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("url-grpo")
@@ -108,8 +113,6 @@ TEXT_LORA_TARGET_MODULES = [
 LORA_TARGET_REGEX = r".*language_model.*\.(" + "|".join(TEXT_LORA_TARGET_MODULES) + r")$"
 
 VLLM_VERSION = "0.33.0"
-W_TOOL_EFFICIENCY = 0.1
-TOOL_BUDGET = 15.0
 
 
 # --------------------------------------------------------------------------------------------------
@@ -118,10 +121,7 @@ TOOL_BUDGET = 15.0
 
 
 def any_requested_scoreable(row: dict[str, Any]) -> bool:
-    return any(
-        bool(row[f"missing_{name}"]) and row.get(f"{name}_label_quality") in SCOREABLE_QUALITIES
-        for name in ("github", "project_page")
-    )
+    return partly_scoreable(row)
 
 
 def load_rows(
@@ -158,44 +158,28 @@ def weight_by_tier(rows: list[dict[str, Any]], exclude: str, weights: str, seed:
     return out
 
 
-def correctness(row: dict[str, Any], findings: URLFindings | None) -> float:
-    """Fraction of verified requested fields that match; unknown labels are never scored."""
-    if findings is None:
-        return 0.0
-    scoring = score_findings(row, findings)
-    fields = {name: ok for name, ok in scoring["fields"].items() if ok is not None}
-    if not fields:
-        return 0.0
-    return sum(bool(ok) for ok in fields.values()) / len(fields)
-
-
-# Rule-based shortcut guard, in the spirit of safeagents: the labels live in a public Hub dataset, so a
-# policy rewarded for correct URLs could learn to look them up instead of researching. Any authored tool
-# input matching these patterns scores 0. Matched against what the agent writes, never tool outputs.
-SHORTCUT_PATTERNS = (
-    re.compile(r"paper-url-extraction|pwc-url-extraction|\bnielsr/|community-science-llm-traces", re.IGNORECASE),
-    re.compile(r"\bhf\s+download\b|load_dataset|snapshot_download|hf_hub_download"),
-    re.compile(r"\bHF_TOKEN\b|\bhf\s+auth\b|huggingface-cli\s+login|/\.cache/huggingface/token"),
-)
-
-
-def shortcut_violation(events: list[Any]) -> str | None:
-    for event in events:
-        authored = json.dumps(getattr(event, "tool_input", {}) or {})
-        for pattern in SHORTCUT_PATTERNS:
-            if pattern.search(authored):
-                return f"{event.tool_name}: {pattern.pattern[:40]}"
-    return None
-
-
 def url_reward(outcome) -> float | None:
-    """Module-level so TRL can pickle it into the rollout process."""
+    """Module-level so TRL can pickle it into the rollout process: env reward plus the tool-efficiency bonus."""
     if outcome.env_reward is None:
         return None
-    reward = float(outcome.env_reward)
-    if reward >= 1.0 and outcome.tool_call_count is not None:
-        reward += W_TOOL_EFFICIENCY * max(0.0, min(1.0, 1.0 - outcome.tool_call_count / TOOL_BUDGET))
-    return reward
+    return tool_efficiency_bonus(float(outcome.env_reward), outcome.tool_call_count)
+
+
+def episode_reward(
+    row: dict[str, Any],
+    findings: URLFindings | None,
+    messages: list[dict[str, Any]],
+    *,
+    protocol_weight: float,
+    max_tool_calls: int | None,
+) -> float:
+    """Environment reward of one finished rollout, from the same `score_episode` the evaluator records."""
+    events = tool_events(messages)
+    violation = shortcut_violation(events)
+    if violation:
+        logger.warning("shortcut guard: %s on %s scores 0", violation, row.get("arxiv_id"))
+    score = score_episode(row, findings, events, max_tool_calls=max_tool_calls)
+    return env_reward(score, events, protocol_weight=protocol_weight)
 
 
 # --------------------------------------------------------------------------------------------------
@@ -288,16 +272,15 @@ class OpenCodeCaptureSession:
 
         if self.failure and self.failure.startswith("infrastructure:"):
             return VerifyResult(env_reward=None, done=True)
-        violation = shortcut_violation(tool_events(self.messages))
-        if violation:
-            logger.warning("shortcut guard: %s on %s scores 0", violation, self.candidate.arxiv_id)
-            return VerifyResult(env_reward=0.0, done=True)
-        score = correctness(self.row, self.findings)
-        if self.factory.protocol_weight and self.findings is not None:
-            # Correct URLs found without following the research protocol earn only part of the credit,
-            # so the tool-efficiency bonus cannot be bought by skipping the paper or metadata checks.
-            complete, _ = derive_attempt_complete(self.candidate, self.findings, tool_events(self.messages))
-            score *= 1.0 - self.factory.protocol_weight * (not complete)
+        # Correct URLs found without following the research protocol earn only part of the credit, so the
+        # tool-efficiency bonus cannot be bought by skipping the paper or metadata checks.
+        score = episode_reward(
+            self.row,
+            self.findings,
+            self.messages,
+            protocol_weight=self.factory.protocol_weight,
+            max_tool_calls=self.factory.max_tool_calls,
+        )
         return VerifyResult(env_reward=score, done=True)
 
     def close(self) -> None:
@@ -451,14 +434,7 @@ class OpenCodeCaptureSession:
                 client,
                 "post",
                 "/session",
-                {
-                    "title": f"URL RL {self.candidate.arxiv_id}",
-                    "permission": [
-                        {"permission": "*", "pattern": "*", "action": "allow"},
-                        {"permission": "external_directory", "pattern": "*", "action": "deny"},
-                        {"permission": "doom_loop", "pattern": "*", "action": "deny"},
-                    ],
-                },
+                {"title": f"URL RL {self.candidate.arxiv_id}", "permission": SESSION_PERMISSIONS},
             )
             session_id = session["id"]
             response: dict[str, Any] = {}
@@ -468,17 +444,7 @@ class OpenCodeCaptureSession:
                         client,
                         "post",
                         f"/session/{session_id}/message",
-                        {
-                            "model": {"providerID": "capture", "modelID": "policy"},
-                            "system": SYSTEM_PROMPT,
-                            "tools": {name: name in ALLOWED_TOOLS for name in OPENCODE_TOOLS},
-                            "format": {
-                                "type": "json_schema",
-                                "schema": URLFindings.model_json_schema(),
-                                "retryCount": 2,
-                            },
-                            "parts": [{"type": "text", "text": user_prompt(self.candidate)}],
-                        },
+                        message_body(("capture", "policy"), self.candidate),
                     )
             except TimeoutError:
                 timed_out = True
@@ -486,12 +452,7 @@ class OpenCodeCaptureSession:
                 with suppress(Exception):
                     await raw_json(client, "post", f"/session/{session_id}/abort")
             self.messages = await raw_json(client, "get", f"/session/{session_id}/message")
-        structured = (response.get("info") or {}).get("structured")
-        if structured is not None:
-            with suppress(Exception):
-                self.findings = URLFindings.model_validate(structured)
-        if self.findings is None:
-            self.findings = findings_from_messages(self.messages)
+        self.findings, _ = parse_findings(response, self.messages)
         self.tool_calls = len(tool_events(self.messages))
         return timed_out
 
@@ -515,8 +476,10 @@ class OpenCodeCaptureFactory:
         purpose: str = "train",
         upstream_api_key_env: str | None = None,
         protocol_weight: float = 0.0,
+        max_tool_calls: int | None = 15,
     ) -> None:
         self.purpose = purpose
+        self.max_tool_calls = max_tool_calls
         self.protocol_weight = protocol_weight
         # Name of an environment variable, never the credential itself: the factory is pickled.
         self.upstream_api_key_env = upstream_api_key_env
@@ -654,7 +617,7 @@ def start_vllm(args: argparse.Namespace) -> subprocess.Popen:
         str(args.max_staleness + 2),
     ]
     if args.trainer == "trl":
-        # TRL's merged-weight fallback path; the simple trainer only ever loads adapters.
+        # TRL's merged-weight fallback path; adapter-only trainers never need it.
         command += ["--weight-transfer-config", '{"backend":"nccl"}']
     if args.reasoning_parser:
         command += ["--reasoning-parser", args.reasoning_parser]
@@ -708,6 +671,7 @@ def train(args: argparse.Namespace) -> None:
         max_output_tokens=args.max_completion_length,
         scratch_dir=args.scratch_dir,
         protocol_weight=args.protocol_weight,
+        max_tool_calls=args.max_tool_calls,
     )
     dataset = Dataset.from_list(factory().prompt_rows())
     print(f"[train] {len(dataset)} papers, model {args.model}, output {args.output_dir}", flush=True)
@@ -756,7 +720,7 @@ def train(args: argparse.Namespace) -> None:
         r=args.lora_r,
         lora_alpha=2 * args.lora_r,
         lora_dropout=0.0,
-        target_modules=LORA_TARGET_REGEX,
+        target_modules=args.lora_target_modules or LORA_TARGET_REGEX,
     )
     trainer = HarnessAsyncGRPOTrainer(
         model=args.model,
@@ -767,6 +731,11 @@ def train(args: argparse.Namespace) -> None:
         rollout_reward_fn=url_reward,
         peft_config=peft_config,
     )
+    if hasattr(trainer, "_lora_dir"):
+        # TRL (1.18) saves every adapter version it hot-loads into vLLM under <output_dir>/.vllm_lora, and the
+        # checkpoint pushes then upload them to the Hub repo. Keep them outside the output directory instead
+        # (vLLM runs on this machine and reads them by absolute path).
+        trainer._lora_dir = str(Path(args.scratch_dir or tempfile.gettempdir()).resolve() / "url-grpo-vllm-lora")
     trainer.train()
     trainer.save_model(args.output_dir)
     if args.hub_model_id:
@@ -818,10 +787,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--trackio-space-id", default=None)
     parser.add_argument("--run-name", default=None)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--trainer", choices=["trl", "simple"], default="trl", help="'simple' for Inkling 2 (see train_simple)")
+    parser.add_argument(
+        "--max-tool-calls",
+        type=int,
+        default=15,
+        help="Rollouts with this many tool calls are incomplete, as in evaluation (protocol penalty applies)",
+    )
+    # Student-specific settings; `pipeline.py` fills them from the student profile.
+    parser.add_argument(
+        "--trainer", choices=["trl", "simple"], default="trl", help="GRPO backend ('simple': models TRL cannot pack)"
+    )
     parser.add_argument("--vllm-binary", help="Serve with this vLLM executable (e.g. a model-specific image) instead of uvx")
     parser.add_argument("--tool-call-parser", default="qwen3_coder")
     parser.add_argument("--reasoning-parser", default="")
+    parser.add_argument("--vllm-extra-args", default="", help="Extra arguments appended to `vllm serve` (shell-quoted)")
     parser.add_argument("--prompts-per-step", type=int, default=4, help="simple trainer: papers per optimizer step")
     parser.add_argument("--sync-every", type=int, default=1, help="simple trainer: steps between adapter syncs")
     parser.add_argument("--epsilon", type=float, default=0.2)
@@ -833,9 +812,9 @@ def parse_args() -> argparse.Namespace:
         help="simple trainer: keep activations saved for backward in host memory",
     )
     parser.add_argument("--dspark", action="store_true", help="Serve with the checkpoint's DSpark speculative drafter")
-    parser.add_argument("--vllm-extra-args", default="", help="Extra arguments appended to `vllm serve` (shell-quoted)")
-    parser.add_argument("--card-base-model", help="Hub repo id to name as base_model in adapter cards (when --model is a local path)")
     parser.add_argument("--log-rollouts", action="store_true", help="simple trainer: one diagnostic line per rollout")
+    parser.add_argument("--card-base-model", help="Hub repo id to name as base_model in adapter cards (when --model is a local path)")
+    parser.add_argument("--lora-target-modules", default="", help="LoRA target-module regex (default: Qwen3.5 text)")
     return parser.parse_args()
 
 
@@ -1158,10 +1137,15 @@ def train_simple(args: argparse.Namespace) -> None:
 def main() -> None:
     args = parse_args()
     if args.opencode_binary is None:
-        found = shutil.which("opencode")
-        args.opencode_binary = Path(found) if found else install_opencode(Path(tempfile.mkdtemp()) / "opencode")
+        args.opencode_binary = Path(find_or_install_opencode())
     if not args.launch:
-        (train_simple if args.trainer == "simple" else train)(args)
+        if args.trainer == "simple":
+            simple = globals().get("train_simple")
+            if simple is None:
+                raise SystemExit("--trainer simple needs the synchronous GRPO trainer (Inkling support, PR #9)")
+            simple(args)
+        else:
+            train(args)
         return
     vllm = start_vllm(args)
     try:

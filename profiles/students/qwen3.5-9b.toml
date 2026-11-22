@@ -1,0 +1,7 @@
+# Qwen3.5-9B: Qwen3.5 defaults. With 32 concurrent GRPO rollouts the 2x H200 job ran out of host processes
+# (OpenCode killed, posix_spawn EAGAIN); 16 runs at the same speed because the trainer is the bottleneck.
+name = "qwen3.5-9b"
+model = "Qwen/Qwen3.5-9B"
+
+[grpo]
+args = ["--max-concurrent-rollouts", "16"]

@@ -1,0 +1,5 @@
+# Kimi-K3.1-Pro through HF Inference Providers (served by Together). Teacher of the Qwen3.5-9B student.
+name = "kimi-k3.1-pro"
+model = "moonshotai/Kimi-K3.1-Pro"
+opencode_model = "huggingface/moonshotai/Kimi-K3.1-Pro"
+notes = "~$0.10 per paper; 815 accepted train traces (nielsr/paper-url-opencode-traces-kimi)"

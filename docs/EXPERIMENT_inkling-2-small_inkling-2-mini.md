@@ -140,7 +140,8 @@ All public and in the [Hub collection](https://huggingface.co/collections/nielsr
 
 ```bash
 # Teacher baseline and distillation (OpenCode 1.2.4, HF_BILL_TO=huggingface). The `:deepinfra` model id needs an
-# inline OpenCode model entry (see OPENCODE_CONFIG_CONTENT in the commit history of this experiment).
+# inline OpenCode model entry: profiles/teachers/inkling-2-small.toml has it (pipeline.py passes it as
+# --opencode-model-entry).
 uv run generate_opencode_traces.py --split test --limit 500 --attempts-per-row 1 --concurrency 4 \
   --model huggingface/thinkingmachines/Inkling-2-Small:deepinfra --output runs/teacher-test.jsonl
 for i in 0 1 2; do uv run generate_opencode_traces.py --split train --accept-partial --attempts-per-row 1 \
@@ -148,20 +149,16 @@ for i in 0 1 2; do uv run generate_opencode_traces.py --split train --accept-par
   --output runs/distill-w$i.jsonl & done; wait
 python scripts/merge_traces.py runs/train-inkling.jsonl runs/distill-w*.jsonl
 
-REV=$(scripts/inkling_job.sh stage)                       # code snapshot in a private Hub repo
-scripts/inkling_job.sh sft $REV                            # 1x H200, ~92 min
-scripts/inkling_job.sh eval $REV test base/ --base-model thinkingmachines/Inkling-2-Mini --adapter '' --no-enforce-eager
-scripts/inkling_job.sh eval $REV test sft/ --base-model thinkingmachines/Inkling-2-Mini \
-  --adapter nielsr/inkling-2-mini-url-agent-lora --adapter-only --max-lora-rank 64 --no-enforce-eager
-scripts/inkling_job.sh merge $REV nielsr/inkling-2-mini-url-agent-lora nielsr/inkling-2-mini-url-agent-sft-merged
-for i in 0 1 2 3; do scripts/inkling_job.sh probe $REV $i/4; done   # difficulty probe, 4x RTX PRO 6000
-REV=$(scripts/inkling_job.sh stage scripts/rl-inkling-qualified-ids.txt)
-scripts/inkling_job.sh grpo $REV           # 2x RTX PRO 6000, 13 h limit; merges and publishes when it finishes
-# If the job stops early, merge the last pushed checkpoint (copy checkpoint-N/ to the repo root first):
-scripts/inkling_job.sh merge $REV nielsr/inkling-2-mini-url-agent-grpo-lora nielsr/inkling-2-mini-url-agent-grpo-merged \
-  --base-model nielsr/inkling-2-mini-url-agent-sft-merged --card-base-model nielsr/inkling-2-mini-url-agent-sft-merged
-for s in test validation; do scripts/inkling_job.sh eval $REV $s sft-grpo/ --base-model nielsr/inkling-2-mini-url-agent-sft-merged \
-  --adapter nielsr/inkling-2-mini-url-agent-grpo-lora --max-lora-rank 64 --no-enforce-eager; done
-# test_hard: add --dataset nielsr/paper-url-extraction-v2 --include-partial --limit 500 to any eval;
-# scripts/score_records.py --fully-scoreable FILE scores the 94 fully scoreable papers.
+# SFT, merge, difficulty probe, GRPO and evaluation. The run above used the former scripts/inkling_job.sh; the
+# inkling-2-mini profile carries the same settings (image, flavors, parsers, LoRA, hooks, GRPO arguments), and the
+# default repo names under this run name are the ones listed in Artifacts.
+uv run pipeline.py --teacher inkling-2-small --student inkling-2-mini --run-name inkling-2-mini-url-agent \
+  --dataset nielsr/paper-url-extraction-v1-validated \
+  --traces-repo nielsr/inkling-2-mini-url-agent-traces --traces-files train-inkling.jsonl \
+  --grpo-ids scripts/rl-inkling-qualified-ids.txt --stages sft,merge,grpo,eval
+# Select the GRPO pool with the probe instead: --grpo-ids scripts/rl-inkling-ids.txt --stages sft,merge,probe,grpo,eval
+# If GRPO stops early, merge the last pushed checkpoint: --stages grpo --grpo-merge-only
+# test_hard: --dataset nielsr/paper-url-extraction-v2 --splits test,validation,test_hard --eval-include-partial \
+#   --eval-limit 1000 --stages eval; `python -m harness.report table` (or scripts/score_records.py --fully-scoreable)
+#   adds the fully scoreable subset.
 ```

@@ -1,0 +1,66 @@
+# Inkling-2-Mini (inkling2_loop, 26.4B MoE / 3.4B active). Values from PR #9 (scripts/inkling_job.sh).
+# - Served only by the vllm/vllm-openai:inkling-2-mini image, which ships Blackwell kernels: serving and
+#   GRPO run on RTX PRO 6000 (H200 fails with "no kernel image is available"); SFT (transformers) on H200.
+# - Attention-only LoRA: vLLM cannot serve expert adapters on the NVFP4/MXFP8 checkpoint. Adapters are renamed
+#   to the checkpoint's module names for vLLM and merged straight into the BF16 attention tensors.
+# - TRL's tree-packed GRPO rejects attention sinks / short convolutions: the synchronous "simple" backend.
+# - RTX PRO 6000 prefill is slow (~1-2k tokens/s): 8 concurrent rollouts, not 16. Never pass --dspark (the
+#   bundled drafter has no kernels for RTX PRO 6000).
+# The hook modules come with PR #9; until it is merged the pipeline refuses this student.
+name = "inkling-2-mini"
+model = "thinkingmachines/Inkling-2-Mini"
+requires = ["inkling_adapter.py", "inkling_train_patch.py"]
+
+[serve]
+image = "vllm/vllm-openai:inkling-2-mini"
+vllm = "image"
+flavor = "rtx-pro-6000"
+timeout = "3h"
+deps = ["torch"]
+tool_call_parser = "inkling"
+reasoning_parser = "inkling"
+enforce_eager = false
+max_output_tokens = 4096
+
+[lora]
+rank = 64
+sft_target_modules = 'model\.language_model\.layers\.\d+\.self_attn\.(q_proj\.linear|k_proj\.linear|v_proj\.linear|o_proj\.linear|o_proj\.gate_proj)'
+adapter_converter = "inkling_adapter:convert_adapter"
+
+[sft]
+image = "ghcr.io/astral-sh/uv:python3.12-bookworm"
+flavor = "h200"
+deps = ["torch", "transformers==5.24.0", "trl==1.18.2", "peft==0.22.0", "accelerate==1.16.0", "datasets",
+        "pillow", "torchvision", "safetensors"]
+model_class = "AutoModelForMultimodalLM"
+train_patch = "inkling_train_patch"
+keep_reasoning = true
+args = ["--no-4bit", "--max-length", "32768", "--epochs", "1", "--full-trajectory", "--lora-rank", "64",
+        "--gradient-accumulation", "16", "--save-steps", "10", "--save-total-limit", "2"]
+
+[merge]
+method = "merge_adapter:merge_inkling"  # CPU: attention tensors only, the experts are copied (~20 GB download)
+image = "ghcr.io/astral-sh/uv:python3.12-bookworm"
+flavor = "cpu-xl"
+replace_deps = true
+deps = ["torch", "transformers==5.24.0", "peft==0.22.0", "accelerate==1.16.0", "huggingface-hub>=1.13.0",
+        "safetensors>=0.5.0", "pillow", "torchvision"]
+
+[probe]
+temperature = 1.0
+episode_timeout = 300
+timeout = "4h"  # ~2.3 h per shard of 75 papers x 4 attempts
+
+[grpo]
+image = "vllm/vllm-openai:inkling-2-mini"
+flavor = "rtx-pro-6000x2"
+timeout = "13h"  # 390-490 s per step: 100 steps ~12-13 h (PR #9 final launcher)
+backend = "simple"
+deps = ["torch", "transformers==5.24.0", "trl==1.18.2", "peft==0.22.0", "accelerate==1.16.0", "openenv==0.14.0",
+        "datasets>=4.0.0", "httpx>=0.27.0", "huggingface-hub>=1.13.0", "opencode-ai==0.1.0a36",
+        "pydantic>=2.10.0,<2.13", "safetensors>=0.4.0", "aiohttp>=3.13.3", "requests", "pillow", "torchvision"]
+args = ["--temperature", "1.0", "--lora-r", "64", "--max-completion-length", "4096", "--max-model-calls", "24",
+        "--episode-timeout", "300", "--max-train-tokens", "32768", "--vllm-extra-args=--max-num-batched-tokens=16384",
+        "--gpu-memory-utilization", "0.92", "--attention-chunk-size", "512", "--prompts-per-step", "2",
+        "--exclude-tiers", "7", "--tier-weights", "0:3,2:2,3:3,4:3,5:3,6:3",
+        "--num-generations", "4", "--max-concurrent-rollouts", "8", "--learning-rate", "2e-5", "--save-steps", "10"]

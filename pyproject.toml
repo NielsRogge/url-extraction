@@ -11,10 +11,10 @@ requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["url_extraction_agent*"]
+include = ["url_extraction_agent*", "harness*"]
 
 [tool.setuptools.package-data]
-url_extraction_agent = ["prompts/*.txt"]
+harness = ["system_prompt.txt"]
 
 [project.optional-dependencies]
 traces = [
