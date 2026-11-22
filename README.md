@@ -68,8 +68,8 @@ All models, datasets, traces, evaluations and the demo Space are grouped in the
 
 ## Try it
 
-[`nielsr/url-agent-race`](https://huggingface.co/spaces/nielsr/url-agent-race) runs the GRPO-trained
-Qwen3.5-4B (on the Space's own GPU) against the GLM-5.3 teacher on any arXiv paper, streaming both
+[`nielsr/url-agent-race`](https://huggingface.co/spaces/nielsr/url-agent-race) runs the GRPO v3
+Qwen3.5-4B ([`nielsr/qwen35-4b-url-agent-v3-grpo-merged`](https://huggingface.co/nielsr/qwen35-4b-url-agent-v3-grpo-merged)) (on the Space's own GPU) against the GLM-5.3 teacher on any arXiv paper, streaming both
 agents' reasoning and tool calls side by side. Source in [`space/`](space/).
 
 ## Run the recipe
