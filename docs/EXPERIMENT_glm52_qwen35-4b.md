@@ -313,3 +313,47 @@ and the merged [`nielsr/qwen35-4b-url-agent-grpo-v2-merged`](https://huggingface
 SFT v2 checkpoint was mixed: test field accuracy 79.8% -> 82.1%, validation 93.0% -> 87.0%, with 25-35% fewer
 tool calls. As with the first run, accuracy differences are within the noise of 42-50 paper splits; the
 consistent effect of GRPO is shorter episodes.
+
+### GRPO v3: dataset v2, difficulty-probed pool
+
+GRPO v3 is the first run through `pipeline.py`
+(`--stages merge,probe,grpo,eval --sft-adapter nielsr/qwen35-4b-url-agent-lora-v2`; the exact command,
+commit and pinned code snapshot are in `pipeline/run-*.json` of the eval dataset). It starts from merged
+SFT v2 ([`nielsr/qwen35-4b-url-agent-v3-sft-merged`](https://huggingface.co/nielsr/qwen35-4b-url-agent-v3-sft-merged))
+and trains on [`paper-url-extraction-v2`](https://huggingface.co/datasets/nielsr/paper-url-extraction-v2):
+
+- Prompt pool: papers the merged SFT policy solves 1-3 times out of 4 under RL conditions. A new probe of
+  300 v2 train papers qualified 136; the earlier probe of the same policy on 1,710 v1 papers qualified 654
+  that are in v2 train. The union is 748 papers (`scripts/rl-v3-ids.txt`), tier 7 excluded, tiers 0 and
+  2-6 repeated twice so roughly half the draws are not tier 1.
+- lr 2e-5, 150 steps on 2x H200, `--protocol-weight 0.5`. Mean reward per 25 steps 0.75 -> 0.86 -> 0.96
+  -> 0.96 -> 0.90 -> 0.91, within-group std 0.36 -> 0.17.
+
+Results on v2, field accuracy over every paper with a verified field / fully scoreable subset, tool calls:
+
+| Model | test (220) | validation (213) | test_hard (175) |
+|---|---|---|---|
+| Qwen3.5-4B base | 68.8% | 73.2% | 68.4% (12.2) |
+| SFT v2, merged | 90.1% / 93.9% (5.4) | 91.8% / 94.3% (5.6) | 73.2% / 76.1% (6.5) |
+| SFT v2 + GRPO v3 | 89.7% / 89.4% (3.4) | 93.4% / 95.5% (3.3) | 78.1% / 82.4% (4.4) |
+| GLM-5.2 teacher | 90.1% / 86.4% (4.1) | 91.4% / 92.0% (4.0) | 81.8% / 83.0% (7.3) |
+
+GRPO v3 gains 4.9 points over its merged SFT control on `test_hard` (6.3 on the 94 fully scoreable
+papers), 1.6 on validation, and is level on test (195/220 exact for both), with 35-41% fewer tool calls on
+every split. Models: [`-v3-grpo-lora`](https://huggingface.co/nielsr/qwen35-4b-url-agent-v3-grpo-lora),
+[`-v3-grpo-merged`](https://huggingface.co/nielsr/qwen35-4b-url-agent-v3-grpo-merged); episodes and
+sessions: [`nielsr/qwen35-4b-url-agent-v3-eval-public`](https://huggingface.co/datasets/nielsr/qwen35-4b-url-agent-v3-eval-public).
+
+Notes from the run:
+
+- The same SFT v2 weights served as a LoRA adapter scored 83.0% on v2 test against 90.1% merged
+  (validation 91.4% vs 91.8%, test_hard 75.8% vs 73.2%). This is unexplained and under investigation; the
+  GRPO comparison uses the merged control, so it is unaffected.
+- Two student test evaluations had to be rerun: the OpenCode server's shell stopped spawning processes
+  (`posix_spawn ... ENOENT`) mid-job and those episodes were scored as failures. The evaluator now
+  restarts OpenCode instead of scoring harness failures. No earlier published evaluation had this failure.
+- Base-model episodes ran `env` inside OpenCode and printed the job's HF token into raw eval records, which
+  were briefly public. The token was revoked; evaluation and probing now start OpenCode without
+  credentials, every written record is redacted, and datasets stay private until a credential scan passes
+  (see AGENTS.md). The eval was republished from redacted files to a fresh repository.
+

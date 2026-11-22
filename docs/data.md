@@ -44,6 +44,27 @@ and project-page HTML; an LLM (GLM-5.3 by default) may only choose among those U
 resolve. HF metadata gives `gold` labels, adjudicated live URLs `silver`, and papers with no official URL
 anywhere `verified_null`. Mined rows are uploaded under `mined/` in the validated dataset.
 
+### Dataset v2
+
+[`nielsr/paper-url-extraction-v2`](https://huggingface.co/datasets/nielsr/paper-url-extraction-v2) is
+built by `build_dataset_v2.py` from the validated v1 dataset and 1,316 mined papers (three mining jobs):
+
+1. `recheck_nulls.py` re-checks mined `verified_null` GitHub labels. It searches GitHub for the paper
+   title (skipping list-style repositories) and reads the top READMEs; a README naming the paper's arXiv id
+   or exact title in its first 3,000 characters downgrades the field to `unknown` (not scored), because
+   about a third of mined nulls had code released somewhere the paper never links. 123 of 340 null labels
+   were downgraded. The heuristic is conservative: a false positive only stops a field being scored.
+2. Silver project pages on generic hosts (product pages, model hubs, demo studios) become `unknown` (6).
+3. Papers without any scoreable field are dropped (79), as are duplicates and papers already in v1.
+4. 175 mined papers are held out as `test_hard`, stratified by tier
+   (0: 30, 1: 20, 2: 25, 3: 40, 4: 10, 5: 30, 6: 20); the rest join train.
+
+Splits: `train` 5,062 (v1 train plus 1,062 mined), `validation` and `test` (v1, unchanged), `test_hard` 175.
+Because v2 relabels some v1 fields as `unknown`, its test and validation have fewer fully scoreable papers
+(33 and 44) than the v1 tables in the README (42 and 50); compare v2 numbers only with v2 numbers. Evaluate
+with `--include-partial` (students) / `--accept-partial` (teachers) to score every paper on its verified
+fields, and report the fully scoreable subset alongside.
+
 
 ## Agent traces on the Hub
 
