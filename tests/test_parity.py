@@ -222,3 +222,44 @@ def test_records_with_lone_surrogates_are_written(tmp_path):
     with path.open("a", encoding="utf-8") as handle:
         handle.write(record_line(record))
     assert json.loads(path.read_text(encoding="utf-8"))["tool_events"][0]["response"] == "x \ud835 y"
+
+
+def test_evaluator_restarts_opencode_after_a_harness_failure(tmp_path, monkeypatch):
+    """An OpenCode server whose shell tool cannot spawn must not be scored: restart and redo those papers."""
+    from contextlib import asynccontextmanager
+
+    data, good_messages, response = EPISODES["correct_and_complete"]
+    broken_messages = json.loads(json.dumps(good_messages))
+    broken_messages[1]["parts"][0]["state"]["output"] = "Error: ENOENT: no such file or directory, posix_spawn '/usr/bin/bash'"
+    servers: list[str] = []
+
+    @asynccontextmanager
+    async def fake_server(command, base_url=None):
+        servers.append(command)
+        yield "http://opencode"
+
+    class FakeClientFactory:
+        def __init__(self, **kwargs):
+            # The first server is broken; every later one works.
+            self.client = FakeOpenCode(broken_messages if len(servers) == 1 else good_messages, response)
+
+        async def __aenter__(self):
+            return self.client
+
+        async def __aexit__(self, *exc):
+            return False
+
+    rows = [dict(data, paper_id=i, arxiv_id=f"{ARXIV}{i}") for i in range(3)]
+    monkeypatch.setattr(evaluate_vllm, "opencode_server", fake_server)
+    monkeypatch.setattr(evaluate_vllm, "AsyncOpencode", FakeClientFactory)
+    monkeypatch.setattr(evaluate_vllm, "load_dataset", lambda *a, **k: rows)
+    args = evaluate_vllm.argparse.Namespace(
+        include_partial=False, dataset="d", split="test", paper_ids=None, start=0, limit=10, adapter="",
+        adapter_only=False, base_model="m", opencode_binary="opencode", request_timeout=30, concurrency=1,
+        episode_timeout=30, max_tool_calls=15, max_harness_restarts=3,
+    )  # fmt: skip
+    output = tmp_path / "eval.jsonl"
+    asyncio.run(evaluate_vllm.evaluate(args, output))
+    records = [json.loads(line) for line in output.read_text().splitlines()]
+    assert len(servers) == 2 and len(records) == 3
+    assert not any("posix_spawn" in json.dumps(record) for record in records)

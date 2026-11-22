@@ -71,6 +71,20 @@ STRUCTURED_OUTPUT_RETRY = (
 )
 
 
+# Tool failures that mean the OpenCode server itself is broken (e.g. its workspace directory vanished, so every
+# shell spawn fails), not that the model did something wrong. Episodes hitting them say nothing about the model.
+HARNESS_FAILURE_MARKERS = ("posix_spawn",)
+
+
+def harness_failure(record: dict[str, Any]) -> str | None:
+    for event in record.get("tool_events") or []:
+        text = str(event.get("response") or "") + str(event.get("error") or "")
+        for marker in HARNESS_FAILURE_MARKERS:
+            if marker in text:
+                return text.strip().splitlines()[-1][:200] if text.strip() else marker
+    return None
+
+
 def record_line(record: dict[str, Any]) -> str:
     """One JSONL line for an episode record, written as UTF-8.
 

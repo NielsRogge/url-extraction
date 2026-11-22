@@ -57,6 +57,7 @@ from harness.opencode import (  # noqa: E402,F401
     install_opencode,
     opencode_server,
     portable_trajectory,
+    harness_failure,
     raw_json,
     record_line,
     tool_events,
@@ -215,7 +216,7 @@ def completed_keys(path: Path) -> set[tuple[str, int]]:
     if not path.exists():
         return set()
     keys: set[tuple[str, int]] = set()
-    with path.open() as handle:
+    with path.open(encoding="utf-8") as handle:
         for line in handle:
             with suppress(ValueError, KeyError, json.JSONDecodeError):
                 record = json.loads(line)
@@ -236,12 +237,33 @@ async def evaluate(args: argparse.Namespace, output_path: Path) -> None:
         rows = rows[args.start : args.start + args.limit]
     if not rows:
         raise ValueError(f"No scoreable rows selected from {args.dataset}:{args.split}")
-    done = completed_keys(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     models = [("base", args.base_model), ("adapter", "url-agent")] if args.adapter else [("base", args.base_model)]
     if args.adapter and args.adapter_only:
         models = [("adapter", "url-agent")]
 
+    for label, model_id in models:
+        for restart in range(args.max_harness_restarts + 1):
+            pending = [row for row in rows if (label, int(row["paper_id"])) not in completed_keys(output_path)]
+            if not pending:
+                break
+            if restart:
+                print(f"[{label}] restarting OpenCode after a harness failure ({len(pending)} papers left)", flush=True)
+            if not await run_model(args, label, model_id, pending, output_path):
+                break
+        else:
+            raise RuntimeError(f"OpenCode kept failing for {label} after {args.max_harness_restarts} restarts")
+
+
+async def run_model(
+    args: argparse.Namespace, label: str, model_id: str, pending: list[dict[str, Any]], output_path: Path
+) -> bool:
+    """Run `pending` papers on one fresh OpenCode server. Returns True when the server broke.
+
+    An episode with a harness failure (see `harness.opencode.harness_failure`) is not recorded and stops the
+    remaining queue, so the caller can retry those papers on a new server instead of scoring the breakage.
+    """
+    broken = asyncio.Event()
     async with (
         opencode_server(str(args.opencode_binary)) as base_url,
         AsyncOpencode(
@@ -250,38 +272,39 @@ async def evaluate(args: argparse.Namespace, output_path: Path) -> None:
     ):
         semaphore = asyncio.Semaphore(args.concurrency)
 
-        async def run_model(label: str, model_id: str) -> None:
-            pending = [row for row in rows if (label, int(row["paper_id"])) not in done]
+        async def run_row(index: int, row: dict[str, Any]) -> None:
+            async with semaphore:
+                if broken.is_set():
+                    return
+                print(f"[{label} {index}/{len(pending)}] {row['arxiv_id']}", flush=True)
+                record = await run_one(
+                    client,
+                    row,
+                    ("local-vllm", model_id),
+                    episode_timeout=args.episode_timeout,
+                    max_tool_calls=args.max_tool_calls,
+                )
+                if failure := harness_failure(record):
+                    print(f"  harness failure, not recorded: {failure}", flush=True)
+                    broken.set()
+                    return
+                record["evaluation_model"] = label
+                record["difficulty_tier"] = row.get("difficulty_tier")
+                record["served_model"] = model_id
+                with output_path.open("a", encoding="utf-8") as handle:
+                    handle.write(record_line(record))
+                    handle.flush()
+                print(
+                    f"  complete={record['attempt_complete']} correct={record['verification']['all_scoreable_correct']} "
+                    f"tools={len(record['tool_events'])}",
+                    flush=True,
+                )
 
-            async def run_row(index: int, row: dict[str, Any]) -> None:
-                async with semaphore:
-                    print(f"[{label} {index}/{len(pending)}] {row['arxiv_id']}", flush=True)
-                    record = await run_one(
-                        client,
-                        row,
-                        ("local-vllm", model_id),
-                        episode_timeout=args.episode_timeout,
-                        max_tool_calls=args.max_tool_calls,
-                    )
-                    record["evaluation_model"] = label
-                    record["difficulty_tier"] = row.get("difficulty_tier")
-                    record["served_model"] = model_id
-                    with output_path.open("a", encoding="utf-8") as handle:
-                        handle.write(record_line(record))
-                        handle.flush()
-                    print(
-                        f"  complete={record['attempt_complete']} correct={record['verification']['all_scoreable_correct']} "
-                        f"tools={len(record['tool_events'])}",
-                        flush=True,
-                    )
-
-            await asyncio.gather(*(run_row(i, row) for i, row in enumerate(pending, 1)))
-
-        for label, model_id in models:
-            await run_model(label, model_id)
-
-        # Explicitly verify that the OpenCode service remained responsive through the final episode.
-        await raw_json(client, "get", "/global/health")
+        await asyncio.gather(*(run_row(i, row) for i, row in enumerate(pending, 1)))
+        if not broken.is_set():
+            # Explicitly verify that the OpenCode service remained responsive through the final episode.
+            await raw_json(client, "get", "/global/health")
+    return broken.is_set()
 
 
 def load_records(path: Path) -> list[dict[str, Any]]:
@@ -342,6 +365,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-model-len", type=int, default=65536)
     parser.add_argument("--max-output-tokens", type=int, default=1024)
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.85)
+    parser.add_argument("--max-harness-restarts", type=int, default=3, help="Fresh OpenCode servers after harness failures")
     # Serving flags; `pipeline.py` fills them from the student profile.
     parser.add_argument("--vllm-binary", default="vllm", help="vLLM executable, e.g. the one in a model-specific image")
     parser.add_argument("--tool-call-parser", default="qwen3_coder")
