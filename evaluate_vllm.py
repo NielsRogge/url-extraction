@@ -8,7 +8,7 @@
 #   "pydantic>=2.10.0,<2.13",
 #   "python-dotenv>=1.1.0",
 #   "safetensors>=0.4.0",
-#   "vllm>=0.22.0",
+#   "vllm==0.34.0",  # pinned: GRPO v3 evaluations ran on 0.34.0
 # ]
 # ///
 """Evaluate a student (base model and optionally a LoRA adapter) in OpenCode through a local vLLM server.

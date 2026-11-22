@@ -163,3 +163,9 @@ def test_merged_grpo_model_card_names_the_merged_sft_model():
     train, merge = built["grpo"]
     assert f"--card-base-model {run.sft_merged}" in train.command and f"--card-base-model {run.sft_merged}" in merge.command
     assert train.timeout == "13h"
+
+
+def test_probe_args_passthrough():
+    _, built = jobs(["--teacher", "kimi-k3.1-pro", "--student", "qwen3.5-9b", "--stages", "probe", "--probe-args", "--sample 0"])
+    command = built["probe"][0].command
+    assert command.index("--sample 300") < command.index("--sample 0")  # the last flag wins: probe every candidate

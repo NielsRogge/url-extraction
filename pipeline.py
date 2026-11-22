@@ -298,10 +298,11 @@ def probe_jobs(run: Run, rev: str, args: argparse.Namespace) -> list[Job]:
     probe = student.probe
     deps = [dep for dep in script_dependencies("evaluate_vllm.py") if not dep.startswith("vllm")] + student.serve.deps
     jobs = []
-    for index in range(probe.shards):
+    shards = args.probe_shards or probe.shards
+    for index in range(shards):
         flags = [
             "--model", q(run.sft_merged), "--dataset", q(run.dataset), "--sample", str(probe.sample),
-            "--shard", f"{index}/{probe.shards}", "--k", str(probe.k), "--concurrency", str(probe.concurrency),
+            "--shard", f"{index}/{shards}", "--k", str(probe.k), "--concurrency", str(probe.concurrency),
             "--temperature", str(probe.temperature), "--episode-timeout", str(probe.episode_timeout),
             "--max-tool-calls", str(EVAL_RECIPE["max_tool_calls"]), "--max-model-len", str(student.serve.max_model_len),
             "--max-output-tokens", str(student.serve.max_output_tokens), *serve_flags(student, grpo=True),
@@ -318,7 +319,7 @@ def probe_jobs(run: Run, rev: str, args: argparse.Namespace) -> list[Job]:
             pool = "probe-candidates.txt"
         if pool:
             flags += ["--include-ids-file", pool]
-        flags += probe.args
+        flags += probe.args + shlex.split(args.probe_args)
         command = "\n".join(
             [prelude(run, rev, image_vllm=student.serve.vllm == "image"), *select,
              python("difficulty_probe.py", flags, deps=deps), "echo PROBE_DONE"]  # fmt: skip
@@ -619,6 +620,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     for name in ("traces-repo", "sft-adapter", "sft-merged", "grpo-adapter", "grpo-merged", "eval-repo", "code-repo"):
         parser.add_argument(f"--{name}", help=f"Override the {name.replace('-', ' ')} repo id")
     parser.add_argument("--grpo-args", default="", help="Extra train_grpo_harness.py arguments (last flag wins)")
+    parser.add_argument("--probe-shards", type=int, default=0, help="Parallel probe jobs (default: student profile)")
+    parser.add_argument("--probe-args", default="", help="Extra difficulty_probe.py arguments, e.g. '--sample 0' (all)")
     parser.add_argument("--probe-exclude-tiers", default="", help="Probe only train papers outside these tiers, e.g. 7")
     parser.add_argument("--grpo-merge-only", action="store_true", help="GRPO stage: merge the pushed adapter, no training")
     parser.add_argument("--rev", help="Reuse already staged code (code/<rev>/ in the code repo)")
