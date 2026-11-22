@@ -31,14 +31,16 @@ import httpx
 from datasets import load_dataset
 from dotenv import load_dotenv
 from huggingface_hub import get_token
-from opencode_ai import AsyncOpencode
 
 from harness.opencode import (  # noqa: F401 - re-exported for tests and older imports
     ALLOWED_TOOLS,
     OPENCODE_TOOLS,
+    OPENCODE_VERSION,
+    SUPPORTED_OPENCODE_VERSIONS,
     find_or_install_opencode,
     findings_from_messages,
     findings_from_text,
+    opencode_client,
     opencode_server,
     portable_trajectory,
     raw_json,
@@ -189,7 +191,9 @@ async def async_main(args: argparse.Namespace) -> None:
     validate_huggingface_token(model, args.hf_bill_to)
     configure_huggingface_billing(model, args.hf_bill_to)
     configure_model_entry(model, json.loads(args.opencode_model_entry) if args.opencode_model_entry else None)
-    opencode_command = args.opencode_command if args.base_url else find_or_install_opencode(args.opencode_command)
+    opencode_command = (
+        args.opencode_command if args.base_url else find_or_install_opencode(args.opencode_command, args.opencode_version)
+    )
     dataset = load_dataset(args.dataset, split=args.split)
     rows = [dict(row) for row in dataset]
     global ACCEPT_PARTIAL
@@ -206,8 +210,8 @@ async def async_main(args: argparse.Namespace) -> None:
     rows = [row for row in rows if int(row["paper_id"]) not in done]
     args.output.parent.mkdir(parents=True, exist_ok=True)
     async with (
-        opencode_server(opencode_command, base_url=args.base_url) as base_url,
-        AsyncOpencode(base_url=base_url, timeout=httpx.Timeout(args.timeout, connect=10), max_retries=1) as client,
+        opencode_server(opencode_command, base_url=args.base_url, version=args.opencode_version) as server,
+        opencode_client(server, timeout=httpx.Timeout(args.timeout, connect=10)) as client,
     ):
         semaphore = asyncio.Semaphore(args.concurrency)
 
@@ -282,7 +286,11 @@ def parse_args() -> argparse.Namespace:
         help="HF organization to bill (or set HF_BILL_TO; default: huggingface)",
     )
     parser.add_argument("--base-url", help="Attach to an existing `opencode serve` instance")
-    parser.add_argument("--opencode-command", default="opencode", help="Installed automatically if not on PATH")
+    parser.add_argument(
+        "--opencode-command", default="opencode", help="Used if it is --opencode-version, else the pinned release is installed"
+    )
+    parser.add_argument("--opencode-version", default=OPENCODE_VERSION, choices=SUPPORTED_OPENCODE_VERSIONS,
+                        help="OpenCode release to run (recorded in every episode record)")
     parser.add_argument(
         "--opencode-model-entry",
         help="JSON model entry added to OpenCode's inline config for --model (needed for provider-pinned ids)",

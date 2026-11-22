@@ -14,7 +14,7 @@ build-backend = "setuptools.build_meta"
 include = ["url_extraction_agent*", "harness*"]
 
 [tool.setuptools.package-data]
-harness = ["system_prompt.txt"]
+harness = ["system_prompt.txt", "system_prompt_v2.txt", "opencode_tools/*.json"]
 
 [project.optional-dependencies]
 traces = [

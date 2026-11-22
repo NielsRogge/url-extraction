@@ -6,12 +6,16 @@ structured-output schema, so a change here changes all of them together.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Annotated, Any
 
 from pydantic import BaseModel, ConfigDict, HttpUrl, StringConstraints, field_validator
 
 SYSTEM_PROMPT = (Path(__file__).parent / "system_prompt.txt").read_text().strip()
+# OpenCode 2.x has no structured output: the answer contract (a JSON-only final message with the schema) is part
+# of the system prompt, which runs as the `url-agent` config agent's prompt (harness/opencode_v2.py).
+_SYSTEM_PROMPT_V2_TEMPLATE = (Path(__file__).parent / "system_prompt_v2.txt").read_text().strip()
 
 # JSON Schema's `format: uri` is only an annotation for several guided decoders. A pattern is enforceable
 # (e.g. by vLLM), which keeps prose such as "None.OnlyGitHub..." out of the URL fields.
@@ -95,6 +99,12 @@ def user_prompt(candidate: PaperCandidate) -> str:
             f"Known project page URL: {candidate.known_project_page_url or 'none'}",
         ]
     )
+
+
+def system_prompt_v2() -> str:
+    # The model docstring (the `description`) talks about the 1.x structured-output tool; 1.x sends it unchanged.
+    schema = {key: value for key, value in findings_json_schema().items() if key != "description"}
+    return _SYSTEM_PROMPT_V2_TEMPLATE.replace("{schema}", json.dumps(schema, separators=(",", ":")))
 
 
 def findings_json_schema() -> dict[str, Any]:

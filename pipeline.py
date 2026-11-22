@@ -45,6 +45,10 @@ sys.path.insert(0, str(ROOT))
 
 from harness.profiles import Student, Teacher, load_student, load_teacher  # noqa: E402
 
+# Kept in sync with harness.opencode (not imported: pipeline.py runs with only huggingface-hub and pydantic).
+DEFAULT_OPENCODE_VERSION = "1.2.4"
+SUPPORTED_OPENCODE_VERSIONS = ("1.2.4", "2.3.2")
+
 STAGES = ("traces", "sft", "merge", "probe", "grpo", "eval", "publish")
 DEFAULT_STAGES = ("traces", "sft", "merge", "grpo", "eval", "publish")  # probe is opt-in
 PROBE_TAG = "probe-sft"
@@ -101,10 +105,16 @@ class Run:
     grpo_merged: str
     eval_repo: str
     code_repo: str
+    opencode_version: str = DEFAULT_OPENCODE_VERSION
+
+    @property
+    def oc(self) -> list[str]:
+        """The `--opencode-version` flag every OpenCode-running (and SFT) script gets."""
+        return ["--opencode-version", self.opencode_version]
 
     def artifacts(self) -> list[tuple[str, str, str]]:
         """(repo, type, collection note) for everything this run publishes."""
-        pair = f"{self.teacher.name} -> {self.student.name}"
+        pair = f"{self.teacher.name} -> {self.student.name} (OpenCode {self.opencode_version})"
         return [
             (self.traces_repo, "dataset", f"{pair}: teacher traces ({self.teacher.model}) with agent-trace sessions"),
             (self.sft_adapter, "model", f"{pair}: student SFT LoRA adapter"),
@@ -115,9 +125,27 @@ class Run:
         ]
 
 
+def resolve_opencode_version(args: argparse.Namespace, teacher: Teacher, student: Student) -> str:
+    """--opencode-version, else the profiles' pin (they must agree), else the default (1.2.4)."""
+    pinned = {version for version in (teacher.opencode_version, student.opencode_version) if version}
+    if args.opencode_version:
+        version = args.opencode_version
+    elif len(pinned) > 1:
+        raise SystemExit(f"teacher and student profiles pin different OpenCode versions {sorted(pinned)}; "
+                         "pass --opencode-version")  # fmt: skip
+    else:
+        version = pinned.pop() if pinned else DEFAULT_OPENCODE_VERSION
+    if version not in SUPPORTED_OPENCODE_VERSIONS:
+        raise SystemExit(f"OpenCode {version} is not supported ({', '.join(SUPPORTED_OPENCODE_VERSIONS)})")
+    return version
+
+
 def make_run(args: argparse.Namespace) -> Run:
     teacher, student = load_teacher(args.teacher), load_student(args.student)
-    name = args.run_name or f"{student.slug}-url-agent-{teacher.slug}"
+    version = resolve_opencode_version(args, teacher, student)
+    # Runs in another OpenCode generation get their own repos by default (e.g. ...-url-agent-glm-53-oc2-traces).
+    suffix = "" if version.split(".")[0] == "1" else f"-oc{version.split('.')[0]}"
+    name = args.run_name or f"{student.slug}-url-agent-{teacher.slug}{suffix}"
     prefix = f"{args.namespace}/{name}"
     return Run(
         teacher=teacher,
@@ -132,6 +160,7 @@ def make_run(args: argparse.Namespace) -> Run:
         grpo_merged=args.grpo_merged or f"{prefix}-grpo-merged",
         eval_repo=args.eval_repo or f"{prefix}-eval",
         code_repo=args.code_repo or f"{prefix}-code",
+        opencode_version=version,
     )
 
 
@@ -236,6 +265,7 @@ def trace_jobs(run: Run, rev: str, args: argparse.Namespace) -> list[Job]:
             "--resume-attempted", "--model", q(teacher.opencode_model), "--hf-bill-to", JOB_NAMESPACE,
             "--output", f"/work/out/train-{index}.jsonl", "--output-repo", q(run.traces_repo),
             "--path-in-repo", f"raw/train-{index}.jsonl",  # private until the publish stage scans it
+            *run.oc,
         ]  # fmt: skip
         if settings.accept_partial:
             generate.append("--accept-partial")
@@ -266,7 +296,7 @@ def sft_job(run: Run, rev: str, args: argparse.Namespace) -> Job:
     train = [
         "--traces", "/work/traces.jsonl", "--model", q(student.model), "--output", "/out/sft",
         "--hub-model-id", q(run.sft_adapter), "--public", "--lora-rank", str(student.lora.rank),
-        "--lora-target-modules", q(student.lora.sft_target_modules), *sft.args,
+        "--lora-target-modules", q(student.lora.sft_target_modules), *run.oc, *sft.args,
     ]  # fmt: skip
     if sft.model_class:
         train += ["--model-class", sft.model_class]
@@ -307,6 +337,7 @@ def probe_jobs(run: Run, rev: str, args: argparse.Namespace) -> list[Job]:
             "--max-tool-calls", str(EVAL_RECIPE["max_tool_calls"]), "--max-model-len", str(student.serve.max_model_len),
             "--max-output-tokens", str(student.serve.max_output_tokens), *serve_flags(student, grpo=True),
             "--output-dir", "/probe", "--output-repo", q(run.eval_repo), "--tag", f"{PROBE_TAG}/shard-{index}",
+            *run.oc,
         ]  # fmt: skip
         if student.serve.vllm_extra_args:
             flags.append(f"--vllm-extra-args={q(student.serve.vllm_extra_args)}")
@@ -342,7 +373,7 @@ def grpo_jobs(run: Run, rev: str, args: argparse.Namespace) -> list[list[Job]]:
         "--max-model-len", str(student.serve.max_model_len),
         "--max-completion-length", str(student.serve.max_output_tokens),
         "--max-tool-calls", str(EVAL_RECIPE["max_tool_calls"]), "--trainer", grpo.backend,
-        *serve_flags(student, grpo=True), *GRPO_RECIPE,
+        *serve_flags(student, grpo=True), *GRPO_RECIPE, *run.oc,
     ]  # fmt: skip
     if grpo.backend == "simple":  # it writes its own adapter cards; /model is not a valid Hub base_model
         train += ["--card-base-model", q(run.sft_merged)]
@@ -394,6 +425,7 @@ def eval_jobs(run: Run, rev: str, args: argparse.Namespace) -> list[Job]:
         "--dataset", q(run.dataset), "--limit", str(args.eval_limit), "--concurrency", str(EVAL_RECIPE["concurrency"]),
         "--episode-timeout", str(EVAL_RECIPE["episode_timeout"]), "--max-tool-calls", str(EVAL_RECIPE["max_tool_calls"]),
         "--output-repo", q(run.eval_repo),  # private until the publish stage scans it
+        *run.oc,
     ]  # fmt: skip
     if args.eval_include_partial:
         common.append("--include-partial")
@@ -436,7 +468,7 @@ def teacher_eval_job(run: Run, rev: str, split: str, args: argparse.Namespace) -
         "--max-tool-calls", str(EVAL_RECIPE["max_tool_calls"]), "--model", q(teacher.opencode_model),
         "--hf-bill-to", JOB_NAMESPACE, "--evaluation-label", "teacher", "--no-resume",
         "--output", f"/eval/teacher/{split}.jsonl", "--output-repo", q(run.eval_repo),
-        "--path-in-repo", f"teacher/{split}.jsonl",
+        "--path-in-repo", f"teacher/{split}.jsonl", *run.oc,
     ]  # fmt: skip
     if args.eval_include_partial:  # the same paper population as the evaluator's --include-partial
         generate.append("--accept-partial")
@@ -616,7 +648,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "of the probe stage (the default when probe runs); with probe, a file restricts the probed candidates",
     )
     parser.add_argument("--namespace", default="nielsr", help="Owner of the published repos")
-    parser.add_argument("--run-name", help="Artifact name prefix (default: <student>-url-agent-<teacher>)")
+    parser.add_argument("--run-name", help="Artifact name prefix (default: <student>-url-agent-<teacher>[-oc<major>])")
+    parser.add_argument(
+        "--opencode-version",
+        choices=SUPPORTED_OPENCODE_VERSIONS,
+        help=f"OpenCode release for every stage (default: the profiles' pin, else {DEFAULT_OPENCODE_VERSION})",
+    )
     for name in ("traces-repo", "sft-adapter", "sft-merged", "grpo-adapter", "grpo-merged", "eval-repo", "code-repo"):
         parser.add_argument(f"--{name}", help=f"Override the {name.replace('-', ' ')} repo id")
     parser.add_argument("--grpo-args", default="", help="Extra train_grpo_harness.py arguments (last flag wins)")
@@ -683,6 +720,7 @@ def record_run(run: Run, rev: str, args: argparse.Namespace, argv: list[str]) ->
 
     manifest = {
         "run": run.name, "teacher": run.teacher.name, "student": run.student.name, "dataset": run.dataset,
+        "opencode_version": run.opencode_version,
         "commit": args.commit, "code_snapshot": f"{run.code_repo}@code/{rev}", "stages": args.stages,
         "command": "uv run pipeline.py " + shlex.join(argv), "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "artifacts": {repo: kind for repo, kind, _ in run.artifacts()},
@@ -716,7 +754,7 @@ def main(argv: list[str] | None = None) -> None:
             raise SystemExit(message)
         print(f"warning: {message}; a real run would stop here", flush=True)
     print(f"run {run.name}: {run.teacher.name} ({run.teacher.opencode_model}) -> {run.student.name} ({run.student.model}) "
-          f"on {run.dataset}; stages {','.join(args.stages)}", flush=True)  # fmt: skip
+          f"on {run.dataset} in OpenCode {run.opencode_version}; stages {','.join(args.stages)}", flush=True)  # fmt: skip
     rev = args.rev
     if args.orchestrate:
         if args.commit.endswith("-dirty") and not args.dry_run:

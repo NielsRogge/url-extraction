@@ -44,7 +44,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import httpx  # noqa: E402
 from datasets import load_dataset  # noqa: E402
 from huggingface_hub import HfApi, snapshot_download  # noqa: E402
-from opencode_ai import AsyncOpencode  # noqa: E402
 
 # Re-exported for scripts and tests that import the harness through the evaluator.
 from harness.opencode import (  # noqa: E402,F401
@@ -52,12 +51,14 @@ from harness.opencode import (  # noqa: E402,F401
     MAX_PORTABLE_TOOL_OUTPUT_CHARS,
     OPENCODE_TOOLS,
     OPENCODE_VERSION,
+    SUPPORTED_OPENCODE_VERSIONS,
     findings_from_messages,
     findings_from_text,
+    harness_failure,
     install_opencode,
+    opencode_client,
     opencode_server,
     portable_trajectory,
-    harness_failure,
     raw_json,
     record_line,
     tool_events,
@@ -266,10 +267,8 @@ async def run_model(
     broken = asyncio.Event()
     async with (
         # The student runs on local vLLM and needs no token; keep the job's HF_TOKEN out of the agent's shell.
-        opencode_server(str(args.opencode_binary), strip_credentials=True) as base_url,
-        AsyncOpencode(
-            base_url=base_url, timeout=httpx.Timeout(args.request_timeout, connect=10), max_retries=1
-        ) as client,
+        opencode_server(str(args.opencode_binary), strip_credentials=True, version=args.opencode_version) as server,
+        opencode_client(server, timeout=httpx.Timeout(args.request_timeout, connect=10)) as client,
     ):
         semaphore = asyncio.Semaphore(args.concurrency)
 
@@ -366,6 +365,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-model-len", type=int, default=65536)
     parser.add_argument("--max-output-tokens", type=int, default=1024)
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.85)
+    parser.add_argument("--opencode-version", default=OPENCODE_VERSION, choices=SUPPORTED_OPENCODE_VERSIONS,
+                        help="OpenCode release to run (recorded in every episode record)")
     parser.add_argument("--max-harness-restarts", type=int, default=3, help="Fresh OpenCode servers after harness failures")
     # Serving flags; `pipeline.py` fills them from the student profile.
     parser.add_argument("--vllm-binary", default="vllm", help="vLLM executable, e.g. the one in a model-specific image")
@@ -382,7 +383,7 @@ def main(args: argparse.Namespace) -> None:
     if not os.environ.get("HF_TOKEN"):
         raise RuntimeError("HF_TOKEN must be passed as a Job secret")
     workdir = Path(tempfile.mkdtemp(prefix="url-agent-eval-"))
-    args.opencode_binary = install_opencode(workdir / "bin" / "opencode")
+    args.opencode_binary = install_opencode(workdir / "bin" / "opencode", args.opencode_version)
     os.environ["PATH"] = str(args.opencode_binary.parent) + os.pathsep + os.environ["PATH"]
     configure_opencode(args)
     adapter_path = ""

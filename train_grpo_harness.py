@@ -73,11 +73,19 @@ import httpx
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from harness.opencode import (  # noqa: E402 - the shared harness (same episode code as the evaluator)
+    OPENCODE_VERSION,
     SESSION_PERMISSIONS,
+    SUPPORTED_OPENCODE_VERSIONS,
+    OpenCodeServer,
+    OpenCodeV2Client,
     find_or_install_opencode,
     message_body,
+    opencode_api,
     parse_findings,
     raw_json,
+    require_opencode_version,
+    server_env,
+    start_opencode,
     tool_events,
 )
 from harness.scoring import (  # noqa: E402
@@ -371,7 +379,7 @@ class OpenCodeCaptureSession:
             raise RuntimeError(f"capture session is not trainable: {body}")
         return str(body["session_id"])
 
-    def _start_opencode(self, session_id: str) -> str:
+    def _start_opencode(self, session_id: str) -> OpenCodeServer:
         port = free_port()
         limit = {"context": self.factory.max_model_len, "output": self.factory.max_output_tokens}
         config = {
@@ -398,10 +406,18 @@ class OpenCodeCaptureSession:
         }
         workspace = self.workdir / "workspace"
         workspace.mkdir(parents=True, exist_ok=True)
+        version = self.factory.opencode_version
         # Many OpenCode servers cold-starting at once crash or stall (shared provider-package cache);
         # start them one at a time. Startup takes ~1-2 s, the episode itself runs concurrently.
         with self.factory.startup_lock:
-            return self._spawn_opencode(port, env, workspace)
+            if opencode_api(version) == 2:
+                # The policy is served locally; the agent's shell needs no HF token (strip_credentials).
+                env = server_env(version, env, workspace=self.workdir, strip_credentials=True)
+                self.process, server = start_opencode(
+                    self.factory.opencode_binary, version, workspace, env, port=port, new_session=True
+                )
+                return server
+            return OpenCodeServer(self._spawn_opencode(port, env, workspace), version)
 
     def _spawn_opencode(self, port: int, env: dict[str, str], workspace: Path) -> str:
         self.process = subprocess.Popen(
@@ -424,12 +440,14 @@ class OpenCodeCaptureSession:
         raise TimeoutError("OpenCode did not become healthy within 120 seconds")
 
     async def _run(self, episode_timeout: float) -> bool:
+        self.capture_id = self._mint_capture_session()
+        server = self._start_opencode(self.capture_id)
+        if server.api == 2:
+            return await self._run_v2(server, episode_timeout)
         from opencode_ai import AsyncOpencode
 
-        self.capture_id = self._mint_capture_session()
-        base_url = self._start_opencode(self.capture_id)
         timed_out = False
-        async with AsyncOpencode(base_url=base_url, timeout=httpx.Timeout(episode_timeout + 60, connect=10)) as client:
+        async with AsyncOpencode(base_url=server.url, timeout=httpx.Timeout(episode_timeout + 60, connect=10)) as client:
             session = await raw_json(
                 client,
                 "post",
@@ -456,6 +474,26 @@ class OpenCodeCaptureSession:
         self.tool_calls = len(tool_events(self.messages))
         return timed_out
 
+    async def _run_v2(self, server: OpenCodeServer, episode_timeout: float) -> bool:
+        """The same rollout in OpenCode 2 (`harness.opencode_v2`): JSON final message instead of StructuredOutput."""
+        from harness import opencode_v2
+
+        async with OpenCodeV2Client(server, timeout=httpx.Timeout(episode_timeout + 60, connect=10)) as client:
+            _, raw, failure, timed_out = await opencode_v2.run_session(
+                client,
+                ("capture", "policy"),
+                user_prompt(self.candidate),
+                title=f"URL RL {self.candidate.arxiv_id}",
+                episode_timeout=episode_timeout,
+                max_tool_calls=None,  # bounded by the capture proxy's max_model_calls, as in 1.x rollouts
+            )
+        if timed_out:
+            self.failure = failure
+        self.messages = opencode_v2.normalize_messages(raw)
+        self.findings, _ = parse_findings({}, self.messages)
+        self.tool_calls = len(tool_events(self.messages))
+        return timed_out
+
 
 class OpenCodeCaptureFactory:
     """`ResourceSessionFactory` for TRL. Picklable: the capture proxy starts lazily in the rollout process."""
@@ -477,8 +515,10 @@ class OpenCodeCaptureFactory:
         upstream_api_key_env: str | None = None,
         protocol_weight: float = 0.0,
         max_tool_calls: int | None = 15,
+        opencode_version: str = OPENCODE_VERSION,
     ) -> None:
         self.purpose = purpose
+        self.opencode_version = opencode_version
         self.max_tool_calls = max_tool_calls
         self.protocol_weight = protocol_weight
         # Name of an environment variable, never the credential itself: the factory is pickled.
@@ -665,6 +705,7 @@ def train(args: argparse.Namespace) -> None:
         llm_url=vllm_url,
         model=args.model,
         opencode_binary=str(args.opencode_binary),
+        opencode_version=args.opencode_version,
         episode_timeout=args.episode_timeout,
         max_model_calls=args.max_model_calls,
         max_model_len=args.max_model_len,
@@ -779,6 +820,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--vllm-device", default="0")
     parser.add_argument("--train-device", default="1")
     parser.add_argument("--opencode-binary", type=Path, default=None)
+    parser.add_argument("--opencode-version", default=OPENCODE_VERSION, choices=SUPPORTED_OPENCODE_VERSIONS,
+                        help="OpenCode release the rollouts run in (must match the SFT traces)")
     parser.add_argument("--scratch-dir", default=None)
     parser.add_argument("--output-dir", default="runs/url-grpo")
     parser.add_argument("--hub-model-id", default=None)
@@ -901,6 +944,7 @@ def train_simple(args: argparse.Namespace) -> None:
         llm_url=vllm_url,
         model=args.model,
         opencode_binary=str(args.opencode_binary),
+        opencode_version=args.opencode_version,
         episode_timeout=args.episode_timeout,
         max_model_calls=args.max_model_calls,
         max_model_len=args.max_model_len,
@@ -1137,7 +1181,9 @@ def train_simple(args: argparse.Namespace) -> None:
 def main() -> None:
     args = parse_args()
     if args.opencode_binary is None:
-        args.opencode_binary = Path(find_or_install_opencode())
+        args.opencode_binary = Path(find_or_install_opencode("opencode", args.opencode_version))
+    else:
+        require_opencode_version(args.opencode_binary, args.opencode_version)
     if not args.launch:
         if args.trainer == "simple":
             simple = globals().get("train_simple")

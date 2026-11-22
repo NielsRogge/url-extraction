@@ -94,6 +94,29 @@ TOOLS = [
         },
     },
 ]
+# The tool schemas above are the hand-written ones every 1.2.4 student was trained with (kept so those runs
+# reproduce). For OpenCode 2.x the student trains with the exact tool definitions OpenCode sends to the model,
+# captured from the server (harness/opencode_tools/opencode-<version>.json).
+LEGACY_TOOLS_VERSION = "1.2.4"
+TOOLS_DIR = Path(__file__).resolve().parent / "harness" / "opencode_tools"
+
+
+def tools_for(opencode_version: str) -> list[dict[str, Any]]:
+    if opencode_version == LEGACY_TOOLS_VERSION:
+        return TOOLS
+    path = TOOLS_DIR / f"opencode-{opencode_version}.json"
+    if not path.exists():
+        raise FileNotFoundError(f"No captured tool schemas for OpenCode {opencode_version} ({path})")
+    return json.loads(path.read_text())
+
+
+def check_trace_version(records: list[dict[str, Any]], opencode_version: str) -> None:
+    """Traces from another OpenCode version have other tool names and answer contracts; refuse to mix them."""
+    versions = {str(record.get("opencode_version") or LEGACY_TOOLS_VERSION) for record in records}
+    if versions != {opencode_version}:
+        raise ValueError(f"traces are from OpenCode {sorted(versions)}, but --opencode-version is {opencode_version}")
+
+
 MAX_TOOL_CONTENT_CHARS = 8_000
 TEXT_LORA_TARGET_MODULES = [
     "down_proj",
@@ -329,14 +352,15 @@ def load_model(args: argparse.Namespace) -> Any:
 
 
 def main(args: argparse.Namespace) -> None:
-    global KEEP_REASONING
+    global KEEP_REASONING, TOOLS
     KEEP_REASONING = args.keep_reasoning
+    records = load_records(args.traces, args.trace_dataset, args.trace_split)
+    check_trace_version(records, args.opencode_version)
+    TOOLS = tools_for(args.opencode_version)
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
     tokenizer.pad_token = tokenizer.pad_token or tokenizer.eos_token
     render = render_trajectory_examples if args.full_trajectory else render_examples
-    rendered_dataset = render(
-        load_records(args.traces, args.trace_dataset, args.trace_split), tokenizer, max_length=args.max_length
-    )
+    rendered_dataset = render(records, tokenizer, max_length=args.max_length)
     train_dataset = tokenize_examples(rendered_dataset, tokenizer, args.max_length)
     quantization = None
     if not args.no_4bit:
@@ -434,6 +458,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--train-patch", default="", help="module whose enable(chunk_size=...) patches training attention")
     parser.add_argument("--attention-chunk-size", type=int, default=1024, help="Query chunk for --train-patch")
     parser.add_argument("--keep-reasoning", action="store_true", help="Distil the teacher's reasoning_content")
+    parser.add_argument("--opencode-version", default=LEGACY_TOOLS_VERSION,
+                        help="OpenCode release the traces come from; selects the tool schemas the student trains with")
     return parser.parse_args()
 
 

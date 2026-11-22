@@ -48,6 +48,7 @@ class Teacher:
     provider: str = ""  # Inference Providers routing pin ("" = automatic); informational, the pin is in opencode_model
     opencode_model_entry: dict[str, Any] = field(default_factory=dict)  # inline OpenCode model declaration
     notes: str = ""
+    opencode_version: str = ""  # pin the OpenCode release for runs with this teacher ("" = the pipeline default)
     traces: TraceSettings = field(default_factory=TraceSettings)
 
     @property
@@ -141,6 +142,7 @@ class Student:
     model: str
     notes: str = ""
     requires: list[str] = field(default_factory=list)  # extra repo files the hooks need in job code staging
+    opencode_version: str = ""  # pin the OpenCode release for runs with this student ("" = the pipeline default)
     serve: ServeSettings = field(default_factory=ServeSettings)
     lora: LoraSettings = field(default_factory=LoraSettings)
     sft: SFTSettings = field(default_factory=SFTSettings)

@@ -5,7 +5,7 @@ from harness.profiles import available_profiles, load_student, load_teacher
 
 
 def test_all_profiles_load():
-    assert available_profiles("teachers") == ["glm-5.2", "inkling-2-small", "kimi-k3.1-pro"]
+    assert available_profiles("teachers") == ["glm-5.2", "glm-5.3", "inkling-2-small", "kimi-k3.1-pro"]
     assert available_profiles("students") == ["inkling-2-mini", "qwen3.5-4b", "qwen3.5-9b"]
     for name in available_profiles("teachers"):
         assert load_teacher(name).opencode_model.startswith("huggingface/")
