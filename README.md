@@ -38,24 +38,39 @@ OpenCode with a 180 s budget and at most 15 tool calls. Test has 42 papers (84 f
 | Kimi-K3.1-Pro teacher | 88.1% | - | 7.5 |
 | Inkling-2-Mini SFT + GRPO (Inkling-2-Small traces; teacher 85.7%) | 85.7% | 92.0% | 4.1 |
 
+### Hard papers ([`paper-url-extraction-v2`](https://huggingface.co/datasets/nielsr/paper-url-extraction-v2) `test_hard`)
+
+`test_hard` holds 175 mined papers stratified by difficulty tier: URLs only in the PDF, GitHub only via
+the project page, papers with no official URL. Field accuracy over every paper with a verified field, each
+student against its own merged SFT checkpoint in the same job:
+
+| Pair | SFT | SFT + GRPO | Teacher | Tool calls (SFT -> GRPO, teacher) |
+|---|---:|---:|---:|---|
+| GLM-5.2 -> Qwen3.5-4B (GRPO v3) | 73.2% | 78.1% | 81.8% | 6.5 -> 4.4, 7.3 |
+| Inkling-2-Small -> Inkling-2-Mini | 70.6% | 84.8% | 80.7% | 8.5 -> 7.7, 11.3 |
+| Kimi-K3.1-Pro -> Qwen3.5-9B (GRPO v3) | 73.2% | 66.5% | 80.3% | 5.2 -> 5.6, 11.4 |
+
 Takeaways:
 
-- **SFT is what closes the gap.** Both students reach their teacher's accuracy with about half the tool
-  calls of the Kimi teacher and the same as GLM, while the teachers cost about $0.03 (GLM-5.2) and $0.10
-  (Kimi) per paper through Inference Providers.
-- **GRPO mainly makes episodes shorter.** Its accuracy changes are within run-to-run noise, which is at
-  least 5 points on splits this small.
-- **The benchmark is mostly easy.** Most papers are solved by one HF API call. Harder papers, whose URLs
-  are only in the PDF or on the project page, are being mined to make evaluation and the RL signal more
-  informative ([docs/data.md](docs/data.md)).
+- **SFT is what closes the gap on easy papers.** Both students reach their teacher's accuracy on the
+  original splits with about half the tool calls of the Kimi teacher and the same as GLM, while the
+  teachers cost about $0.03 (GLM-5.2) and $0.10 (Kimi) per paper through Inference Providers.
+- **GRPO can pay off on hard papers, but not reliably.** On the original splits its accuracy changes are
+  within run-to-run noise (at least 5 points on 42-50 papers) and it mainly shortens episodes. On
+  `test_hard`, GRPO with a difficulty-probed, hard-weighted prompt pool adds 4.9 points for the 4B and
+  14.2 points for Inkling-2-Mini (McNemar p = 2e-6), which then beats its teacher; faster episodes are
+  much of the mechanism (Inkling's timeouts fell from 42 to 8). The same recipe cost the 9B 6.7 points
+  with a flat training reward; the 9B base is already strong on v2 (71.0% on `test_hard`).
+- **The original benchmark is mostly easy.** Most of its papers are solved by one HF API call. Dataset v2
+  adds 1,062 mined harder training papers and `test_hard` ([docs/data.md](docs/data.md)).
 
 All models, datasets, traces, evaluations and the demo Space are grouped in the
 [Hub collection](https://huggingface.co/collections/nielsr/paper-url-agent-frontier-to-small-distillation-6b01c8378db0ff55d524014e).
 
 ## Try it
 
-[`nielsr/url-agent-race`](https://huggingface.co/spaces/nielsr/url-agent-race) runs the GRPO-trained
-Qwen3.5-4B (on the Space's own GPU) against the GLM-5.3 teacher on any arXiv paper, streaming both
+[`nielsr/url-agent-race`](https://huggingface.co/spaces/nielsr/url-agent-race) runs the GRPO v3
+Qwen3.5-4B ([`nielsr/qwen35-4b-url-agent-v3-grpo-merged`](https://huggingface.co/nielsr/qwen35-4b-url-agent-v3-grpo-merged)) (on the Space's own GPU) against the GLM-5.3 teacher on any arXiv paper, streaming both
 agents' reasoning and tool calls side by side. Source in [`space/`](space/).
 
 ## Run the recipe
@@ -90,7 +105,7 @@ rewarded by the same code (`tests/test_parity.py`).
 | `evaluate_vllm.py` | Paired base vs. adapter evaluation in OpenCode, served by vLLM |
 | `merge_adapter.py` | Merge a LoRA into a standalone checkpoint |
 | `trace_export.py` | Episodes as Pi sessions for the Hub agent-traces viewer ([docs/data.md](docs/data.md)) |
-| `validate_labels.py`, `tier_labels.py`, `difficulty_probe.py`, `mine_papers.py` | Label validation, difficulty tiers, RL prompt selection, mining harder papers ([docs/data.md](docs/data.md)) |
+| `validate_labels.py`, `tier_labels.py`, `difficulty_probe.py`, `mine_papers.py`, `recheck_nulls.py`, `build_dataset_v2.py` | Label validation, difficulty tiers, RL prompt selection, mining harder papers, dataset v2 ([docs/data.md](docs/data.md)) |
 | `space/`, `scripts/serve_space.py` | Side-by-side demo Space and its deployment |
 | `url_extraction_agent/` | Production batch runner |
 | `deploy_endpoint.py`, `run_endpoint_agent.py`, `prepare_canary.py`, `finalize_evaluation.py`, `convert_mlx.py` | Serving and production runs ([docs/deployment.md](docs/deployment.md)) |

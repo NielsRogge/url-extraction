@@ -19,8 +19,8 @@ prompt and JSON answer schema. Each panel streams that agent's tool calls; the r
 the last race.
 
 - **Student**: served by vLLM on this Space's own GPU (`STUDENT_MODEL`, default
-  `nielsr/qwen35-4b-url-agent-grpo-v2-merged`).
-- **Teacher**: GLM-5.2 through Hugging Face Inference Providers.
+  `nielsr/qwen35-4b-url-agent-v3-grpo-merged`).
+- **Teacher**: GLM-5.3 (`TEACHER_MODEL`) through Hugging Face Inference Providers.
 
 ## Configuration
 
