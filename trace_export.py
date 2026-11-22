@@ -133,6 +133,7 @@ def record_to_pi_session(record: dict[str, Any]) -> list[dict[str, Any]]:
         "difficulty_tier": record.get("difficulty_tier"),
         "accepted": record.get("accepted"),
         "attempt": record.get("attempt"),
+        "opencode_version": record.get("opencode_version") or "1.2.4",
     }
     lines: list[dict[str, Any]] = [header]
     parent: str | None = None
