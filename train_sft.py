@@ -23,7 +23,7 @@ from typing import Any
 import torch
 from datasets import Dataset, load_dataset
 from peft import LoraConfig
-from transformers import AutoTokenizer, BitsAndBytesConfig
+from transformers import AutoConfig, AutoTokenizer, BitsAndBytesConfig
 from trl import SFTConfig, SFTTrainer
 
 TOOLS = [
@@ -152,6 +152,31 @@ def normalized_messages(record: dict[str, Any]) -> list[dict[str, Any]]:
         messages.append(message)
     return messages
 
+# Inkling 2 (inkling2_loop): attention-only LoRA. vLLM's Inkling2 LoRA can add deltas to routed experts only when
+# the experts are BF16, but its loader accepts only the checkpoint's NVFP4/MXFP8 experts, so expert adapters
+# cannot be served. The attention projections (q, k, v, o and the output gate) are served on the quantized
+# checkpoint, and the looped middle layers reuse the same adapter on each of their three passes.
+INKLING_LORA_TARGET_MODULES = (
+    r"model\.language_model\.layers\.\d+\.self_attn\.(q_proj\.linear|k_proj\.linear|v_proj\.linear|o_proj\.linear|o_proj\.gate_proj)"
+)
+
+
+def is_inkling(model_id: str) -> bool:
+    return AutoConfig.from_pretrained(model_id, trust_remote_code=True).model_type.startswith("inkling2")
+
+
+def load_inkling_model(model_id: str, attention_chunk_size: int) -> Any:
+    """Load Inkling 2 in BF16 (transformers dequantizes the NVFP4/MXFP8 experts) with chunked training attention."""
+    from transformers import AutoModelForMultimodalLM
+
+    import inkling_train_patch
+
+    inkling_train_patch.enable(chunk_size=attention_chunk_size)
+    model = AutoModelForMultimodalLM.from_pretrained(model_id, dtype=torch.bfloat16)
+    model.config.use_cache = False
+    model.config.text_config.use_cache = False
+    return model
+
 
 def render_trajectory_examples(
     records: list[dict[str, Any]], tokenizer: Any, max_length: int | None = None
@@ -271,16 +296,27 @@ def main(args: argparse.Namespace) -> None:
         load_records(args.traces, args.trace_dataset, args.trace_split), tokenizer, max_length=args.max_length
     )
     train_dataset = tokenize_examples(rendered_dataset, tokenizer, args.max_length)
+    inkling = is_inkling(args.model)
     quantization = None
-    if not args.no_4bit:
+    if not args.no_4bit and not inkling:
         quantization = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_quant_type="nf4",
             bnb_4bit_compute_dtype=torch.bfloat16,
             bnb_4bit_use_double_quant=True,
         )
+    model: Any = args.model
+    target_modules: Any = TEXT_LORA_TARGET_MODULES
+    model_init_kwargs: dict[str, Any] | None = {
+        "torch_dtype": torch.bfloat16 if not args.fp16 else torch.float16,
+        "trust_remote_code": True,
+    }
+    if inkling:
+        model = load_inkling_model(args.model, args.attention_chunk_size)
+        target_modules = INKLING_LORA_TARGET_MODULES
+        model_init_kwargs = None
     trainer = SFTTrainer(
-        model=args.model,
+        model=model,
         processing_class=tokenizer,
         train_dataset=train_dataset,
         peft_config=LoraConfig(
@@ -292,7 +328,7 @@ def main(args: argparse.Namespace) -> None:
             # Qwen3.5ForConditionalGeneration also contains an unused vision
             # tower. Explicit text-module names keep the adapter compatible
             # with text-only vLLM and avoid storing inert visual LoRA tensors.
-            target_modules=TEXT_LORA_TARGET_MODULES,
+            target_modules=target_modules,
         ),
         quantization_config=quantization,
         args=SFTConfig(
@@ -312,11 +348,11 @@ def main(args: argparse.Namespace) -> None:
             report_to="none",
             push_to_hub=bool(args.hub_model_id),
             hub_model_id=args.hub_model_id,
-            hub_private_repo=bool(args.hub_model_id),
-            model_init_kwargs={
-                "torch_dtype": torch.bfloat16 if not args.fp16 else torch.float16,
-                "trust_remote_code": True,
-            },
+            hub_private_repo=bool(args.hub_model_id) and not args.public,
+            hub_strategy="checkpoint" if args.hub_model_id else "every_save",
+            save_total_limit=args.save_total_limit,
+            gradient_checkpointing_kwargs={"use_reentrant": False},
+            model_init_kwargs=model_init_kwargs,
         ),
     )
     trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
@@ -350,6 +386,11 @@ def parse_args() -> argparse.Namespace:
         help="One example per trajectory with every assistant turn supervised (much less compute)",
     )
     parser.add_argument("--fp16", action="store_true")
+    parser.add_argument("--public", action="store_true", help="Create the Hub repo as public (e.g. when private storage is full)")
+    parser.add_argument("--save-total-limit", type=int, default=None)
+    parser.add_argument(
+        "--attention-chunk-size", type=int, default=1024, help="Inkling 2 only: query chunk of the training attention"
+    )
     return parser.parse_args()
 
 

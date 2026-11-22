@@ -29,6 +29,8 @@ import asyncio
 import collections
 import json
 import os
+import random
+import shlex
 import shutil
 import subprocess
 import sys
@@ -56,15 +58,23 @@ def scoreable(row: dict[str, Any]) -> bool:
 
 
 def start_vllm(model: str, args: argparse.Namespace) -> subprocess.Popen:
+    launcher = (
+        [args.vllm_binary]
+        if args.vllm_binary
+        else [shutil.which("uvx") or "uvx", "--python", "3.12", "--from", f"vllm=={VLLM_VERSION}", "vllm"]
+    )
     command = [
-        shutil.which("uvx") or "uvx", "--python", "3.12", "--from", f"vllm=={VLLM_VERSION}", "vllm", "serve", model,
+        *launcher, "serve", model,
         "--served-model-name", SERVED, "--host", "127.0.0.1", "--port", "8000",
         "--max-model-len", str(args.max_model_len), "--gpu-memory-utilization", "0.9",
-        "--language-model-only", "--enable-auto-tool-choice", "--tool-call-parser", "qwen3_coder",
+        "--language-model-only", "--enable-auto-tool-choice", "--tool-call-parser", args.tool_call_parser,
         "--max-num-seqs", str(max(8, args.concurrency)),
         # Same sampling as GRPO rollouts; OpenCode sends no temperature of its own.
         "--override-generation-config", json.dumps({"temperature": args.temperature, "top_p": 1.0, "top_k": -1}),
     ]  # fmt: skip
+    if args.reasoning_parser:
+        command += ["--reasoning-parser", args.reasoning_parser]
+    command += shlex.split(args.vllm_extra_args)
     print("[probe] " + " ".join(command), flush=True)
     return subprocess.Popen(command, start_new_session=True)
 
@@ -102,7 +112,7 @@ async def probe(rows: list[dict[str, Any]], args: argparse.Namespace, out: Path)
                     "npm": "@ai-sdk/openai-compatible",
                     "name": "Local vLLM",
                     "options": {"baseURL": "http://127.0.0.1:8000/v1", "apiKey": "EMPTY"},
-                    "models": {SERVED: {"name": "policy", "limit": {"context": args.max_model_len, "output": 1024}}},
+                    "models": {SERVED: {"name": "policy", "limit": {"context": args.max_model_len, "output": args.max_output_tokens}}},
                 }
             },
         }
@@ -110,7 +120,7 @@ async def probe(rows: list[dict[str, Any]], args: argparse.Namespace, out: Path)
     sem = asyncio.Semaphore(args.concurrency)
     started = time.monotonic()
     finished = 0
-    async with opencode_server(str(args.opencode_binary)) as base_url, AsyncOpencode(
+    async with opencode_server(str(args.opencode_binary), strip_credentials=True) as base_url, AsyncOpencode(
         base_url=base_url, timeout=httpx.Timeout(args.episode_timeout + 120, connect=10), max_retries=1
     ) as client:
 
@@ -175,9 +185,26 @@ def main() -> None:
     parser.add_argument("--max-model-len", type=int, default=65536)
     parser.add_argument("--output-dir", type=Path, default=Path("difficulty"))
     parser.add_argument("--output-repo", help="Dataset repo to upload results to (under difficulty/)")
+    parser.add_argument("--max-output-tokens", type=int, default=1024, help="Per-call output limit (match the RL rollouts)")
+    parser.add_argument("--vllm-binary", help="Serve with this vLLM executable (e.g. a model-specific image) instead of uvx")
+    parser.add_argument("--tool-call-parser", default="qwen3_coder")
+    parser.add_argument("--reasoning-parser", default="")
+    parser.add_argument("--vllm-extra-args", default="", help="Extra `vllm serve` arguments (shell-quoted)")
+    parser.add_argument("--include-ids-file", help="Only probe these arXiv IDs (one per line), e.g. a candidate pool")
+    parser.add_argument("--sample", type=int, help="Probe a random sample of this many papers (with --seed)")
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--shard", default="0/1", help="i/n: probe the i-th of n disjoint shards (parallel jobs)")
+    parser.add_argument("--tag", default="", help="Sub-directory under difficulty/ when publishing (e.g. per shard)")
     args = parser.parse_args()
 
     rows = [dict(r) for r in load_dataset(args.dataset, split=args.split) if scoreable(dict(r))]
+    if args.include_ids_file:
+        include = set(Path(args.include_ids_file).read_text().split())
+        rows = [row for row in rows if str(row["arxiv_id"]) in include]
+    if args.sample:
+        rows = random.Random(args.seed).sample(sorted(rows, key=lambda r: str(r["arxiv_id"])), min(args.sample, len(rows)))
+    index, count = (int(x) for x in args.shard.split("/"))
+    rows = rows[index::count]
     if args.limit:
         rows = rows[: args.limit]
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -195,7 +222,7 @@ def main() -> None:
         from huggingface_hub import HfApi
 
         HfApi().upload_folder(
-            folder_path=str(args.output_dir), path_in_repo="difficulty", repo_id=args.output_repo, repo_type="dataset",
+            folder_path=str(args.output_dir), path_in_repo=f"difficulty/{args.tag}".rstrip("/"), repo_id=args.output_repo, repo_type="dataset",
             commit_message=f"Difficulty probe: {args.k} attempts per {args.split} paper",
         )  # fmt: skip
         print(f"[probe] published to {args.output_repo}/difficulty", flush=True)

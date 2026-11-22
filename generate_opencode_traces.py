@@ -42,6 +42,13 @@ from url_extraction_agent.research import (
 )
 from url_extraction_agent.schema import PaperCandidate, ToolEvent, URLFindings
 
+# Credentials an agent can print from its environment (e.g. `env | grep HF`); never written to records.
+CREDENTIAL_RE = re.compile(r"\b(?:hf_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9_-]{20,}|ghp_[A-Za-z0-9]{20,})")
+
+
+def redact_credentials(text: str) -> str:
+    return CREDENTIAL_RE.sub(lambda match: match.group(0)[:3] + "***REDACTED***", text)
+
 DEFAULT_DATASET = "nielsr/paper-url-extraction-v1"
 DEFAULT_MODEL = "huggingface/zai-org/GLM-5.3"
 ALLOWED_TOOLS = {"bash", "read", "grep", "glob", "webfetch"}
@@ -205,20 +212,32 @@ def portable_trajectory(messages: list[dict[str, Any]], final: URLFindings | Non
         if role != "assistant":
             continue
         text_parts: list[str] = []
+        # The teacher's reasoning is kept as `reasoning_content` on the assistant message that follows it
+        # (the field chat templates such as Inkling 2's and Qwen3.5's render as a thinking block).
+        reasoning_parts: list[str] = []
+
+        def assistant(content: str, **extra: Any) -> dict[str, Any]:
+            entry: dict[str, Any] = {"role": "assistant", "content": content, **extra}
+            if reasoning_parts:
+                entry["reasoning_content"] = "\n\n".join(reasoning_parts)
+                reasoning_parts.clear()
+            return entry
+
         for part in message.get("parts", []):
-            if part.get("type") == "text" and part.get("text"):
+            if part.get("type") == "reasoning" and str(part.get("text") or "").strip():
+                reasoning_parts.append(str(part["text"]).strip())
+            elif part.get("type") == "text" and part.get("text"):
                 text_parts.append(str(part["text"]))
             elif part.get("type") == "tool":
                 if text_parts:
-                    result.append({"role": "assistant", "content": "\n".join(text_parts)})
+                    result.append(assistant("\n".join(text_parts)))
                     text_parts.clear()
                 state = part.get("state") or {}
                 call_id = str(part.get("callID") or part.get("id"))
                 result.append(
-                    {
-                        "role": "assistant",
-                        "content": "",
-                        "tool_calls": [
+                    assistant(
+                        "",
+                        tool_calls=[
                             {
                                 "id": call_id,
                                 "type": "function",
@@ -228,7 +247,7 @@ def portable_trajectory(messages: list[dict[str, Any]], final: URLFindings | Non
                                 },
                             }
                         ],
-                    }
+                    )
                 )
                 output = str(state.get("output") if state.get("status") == "completed" else state.get("error") or "")
                 if len(output) > MAX_PORTABLE_TOOL_OUTPUT_CHARS:
@@ -236,8 +255,8 @@ def portable_trajectory(messages: list[dict[str, Any]], final: URLFindings | Non
                         output[:MAX_PORTABLE_TOOL_OUTPUT_CHARS] + "\n[tool output truncated in portable trajectory]"
                     )
                 result.append({"role": "tool", "tool_call_id": call_id, "content": output})
-        if text_parts:
-            result.append({"role": "assistant", "content": "\n".join(text_parts)})
+        if text_parts or reasoning_parts:
+            result.append(assistant("\n".join(text_parts)))
     used_structured_output = any(
         call.get("function", {}).get("name", "").lower() == "structuredoutput"
         for message in result
@@ -533,7 +552,8 @@ async def async_main(args: argparse.Namespace) -> None:
                     except UnicodeEncodeError:  # lone surrogates from tool output; escaped form is still valid JSON
                         line = json.dumps(record)
                     with args.output.open("a", encoding="utf-8") as handle:
-                        handle.write(line + "\n")
+                        # OpenCode needs HF_TOKEN for Inference Providers, so the agent's shell can see it: redact.
+                        handle.write(redact_credentials(line) + "\n")
                         handle.flush()
                     if args.sessions_dir:  # one Pi-format session per episode, for the Hub's agent-traces viewer
                         write_sessions([record], args.sessions_dir)

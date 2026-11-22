@@ -18,7 +18,7 @@ Teachers and students so far:
 |---|---|---|
 | `zai-org/GLM-5.2` (`GLM-5.3` is now the default) | `Qwen/Qwen3.5-4B` | [docs/EXPERIMENT_glm52_qwen35-4b.md](docs/EXPERIMENT_glm52_qwen35-4b.md) |
 | `moonshotai/Kimi-K3.1-Pro` | `Qwen/Qwen3.5-9B` | [docs/EXPERIMENT_kimi-k31_qwen35-9b.md](docs/EXPERIMENT_kimi-k31_qwen35-9b.md) |
-| `thinkingmachines/Inkling-2-Small` | `thinkingmachines/Inkling-2-Mini` | in progress |
+| `thinkingmachines/Inkling-2-Small` | `thinkingmachines/Inkling-2-Mini` | [docs/EXPERIMENT_inkling-2-small_inkling-2-mini.md](docs/EXPERIMENT_inkling-2-small_inkling-2-mini.md) |
 
 ## Results
 
@@ -36,6 +36,7 @@ OpenCode with a 180 s budget and at most 15 tool calls. Test has 42 papers (84 f
 | Qwen3.5-9B SFT (815 Kimi traces) | 85.7% | 93.0% | 3.8 |
 | Qwen3.5-9B SFT + GRPO | 82.1% | 88.0% | 3.0 |
 | Kimi-K3.1-Pro teacher | 88.1% | - | 7.5 |
+| Inkling-2-Mini SFT + GRPO (Inkling-2-Small traces; teacher 85.7%) | 85.7% | 92.0% | 4.1 |
 
 Takeaways:
 

@@ -62,7 +62,7 @@ import tempfile
 import threading
 import time
 import urllib.request
-from contextlib import suppress
+from contextlib import nullcontext, suppress
 from pathlib import Path
 from typing import Any
 
@@ -623,13 +623,13 @@ def wait_for_vllm(url: str, process: subprocess.Popen, timeout_s: float = 2400) 
 
 
 def start_vllm(args: argparse.Namespace) -> subprocess.Popen:
+    launcher = (
+        [args.vllm_binary]
+        if args.vllm_binary
+        else [shutil.which("uvx") or "uvx", "--python", "3.12", "--from", f"vllm=={VLLM_VERSION}", "vllm"]
+    )
     command = [
-        shutil.which("uvx") or "uvx",
-        "--python",
-        "3.12",
-        "--from",
-        f"vllm=={VLLM_VERSION}",
-        "vllm",
+        *launcher,
         "serve",
         args.model,
         "--host",
@@ -643,18 +643,31 @@ def start_vllm(args: argparse.Namespace) -> subprocess.Popen:
         "--language-model-only",
         "--enable-auto-tool-choice",
         "--tool-call-parser",
-        "qwen3_coder",
+        args.tool_call_parser,
         "--return-tokens-as-token-ids",
         "--logprobs-mode",
         "processed_logprobs",
-        "--weight-transfer-config",
-        '{"backend":"nccl"}',
         "--enable-lora",
         "--max-lora-rank",
         str(args.lora_r),
         "--max-loras",
         str(args.max_staleness + 2),
     ]
+    if args.trainer == "trl":
+        # TRL's merged-weight fallback path; the simple trainer only ever loads adapters.
+        command += ["--weight-transfer-config", '{"backend":"nccl"}']
+    if args.reasoning_parser:
+        command += ["--reasoning-parser", args.reasoning_parser]
+    if args.dspark:
+        # The checkpoint's bundled DSpark drafter (vLLM recipe); probabilistic drafting keeps the target distribution.
+        command += [
+            "--speculative-config",
+            '{"method":"dspark","num_speculative_tokens":7,"draft_sample_method":"probabilistic"}',
+        ]
+    if args.vllm_extra_args:
+        import shlex
+
+        command += shlex.split(args.vllm_extra_args)
     env = {
         **os.environ,
         "CUDA_VISIBLE_DEVICES": args.vllm_device,
@@ -805,7 +818,341 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--trackio-space-id", default=None)
     parser.add_argument("--run-name", default=None)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--trainer", choices=["trl", "simple"], default="trl", help="'simple' for Inkling 2 (see train_simple)")
+    parser.add_argument("--vllm-binary", help="Serve with this vLLM executable (e.g. a model-specific image) instead of uvx")
+    parser.add_argument("--tool-call-parser", default="qwen3_coder")
+    parser.add_argument("--reasoning-parser", default="")
+    parser.add_argument("--prompts-per-step", type=int, default=4, help="simple trainer: papers per optimizer step")
+    parser.add_argument("--sync-every", type=int, default=1, help="simple trainer: steps between adapter syncs")
+    parser.add_argument("--epsilon", type=float, default=0.2)
+    parser.add_argument("--epsilon-high", type=float, default=0.28)
+    parser.add_argument("--max-train-tokens", type=int, default=49152, help="simple trainer: longest trained sequence")
+    parser.add_argument("--attention-chunk-size", type=int, default=1024)
+    parser.add_argument(
+        "--offload-activations", action=argparse.BooleanOptionalAction, default=True,
+        help="simple trainer: keep activations saved for backward in host memory",
+    )
+    parser.add_argument("--dspark", action="store_true", help="Serve with the checkpoint's DSpark speculative drafter")
+    parser.add_argument("--vllm-extra-args", default="", help="Extra arguments appended to `vllm serve` (shell-quoted)")
+    parser.add_argument("--card-base-model", help="Hub repo id to name as base_model in adapter cards (when --model is a local path)")
+    parser.add_argument("--log-rollouts", action="store_true", help="simple trainer: one diagnostic line per rollout")
     return parser.parse_args()
+
+
+# --------------------------------------------------------------------------------------------------
+# Simple synchronous GRPO (models TRL's tree-packed async trainer cannot run, e.g. Inkling 2)
+# --------------------------------------------------------------------------------------------------
+#
+# TRL's AsyncGRPOTrainer folds rollouts into a prefix trie with FlashAttention-3 tree attention. It rejects
+# models with attention sinks or with convolutional/recurrent layers other than gated DeltaNet, which rules out
+# Inkling 2 (per-token sinks, causal short convolutions). This loop keeps everything else of the recipe:
+# the same OpenCode rollouts through the OpenEnv capture proxy, the same reward, LoRA adapters hot-loaded into
+# vLLM by name. Each step samples `--prompts-per-step` papers x `--num-generations` rollouts from the current
+# policy, normalizes rewards within each paper, and takes one optimizer step on the clipped importance-weighted
+# policy gradient (token-level normalization, DAPO-style asymmetric clipping) using the engine's own logprobs as
+# the behaviour policy. Groups whose rollouts all score the same carry no signal and are skipped.
+
+
+def rollout_chains(trace: Any, max_tokens: int) -> tuple[list[tuple[list[int], list[int], list[float]]], int]:
+    """Fold a rollout's engine calls into as few forward passes as possible.
+
+    A call whose prompt extends the previous call's prompt + completion continues that sequence; otherwise a new
+    sequence starts (e.g. when the harness drops earlier reasoning from the history). Returns
+    `(input_ids, trained_positions, behaviour_logprobs)` per sequence, plus the number of trained tokens dropped
+    because their sequence exceeds `max_tokens`.
+    """
+    chains: list[tuple[list[int], list[int], list[float]]] = []
+    ids: list[int] = []
+    positions: list[int] = []
+    old: list[float] = []
+    dropped = 0
+
+    def flush() -> None:
+        nonlocal dropped
+        if positions:
+            if len(ids) <= max_tokens:
+                chains.append((list(ids), list(positions), list(old)))
+            else:
+                dropped += len(positions)
+
+    for turn in trace.turns:
+        prompt, completion = list(turn.prompt_token_ids), list(turn.completion_token_ids)
+        if not (ids and prompt[: len(ids)] == ids):
+            flush()
+            positions, old = [], []
+        ids = prompt + completion
+        mask = turn.loss_mask[len(prompt) :]
+        for offset, (keep, logprob) in enumerate(zip(mask, turn.per_token_logps)):
+            if keep:
+                positions.append(len(prompt) + offset)
+                old.append(float(logprob))
+    flush()
+    return chains, dropped
+
+
+def train_simple(args: argparse.Namespace) -> None:
+    import math
+    from concurrent.futures import ThreadPoolExecutor
+
+    import torch
+    from huggingface_hub import HfApi
+    from openenv.core.harness.capture.upstream import training_sampling
+    from peft import LoraConfig, get_peft_model
+
+    from inkling_adapter import convert_adapter
+    from train_sft import INKLING_LORA_TARGET_MODULES, is_inkling, load_inkling_model
+
+    if not is_inkling(args.model):
+        raise ValueError("--trainer simple is wired for Inkling 2 (inkling2_loop) models")
+    exclude: set[str] = set()
+    if args.exclude_ids_file:
+        exclude = {line.strip() for line in Path(args.exclude_ids_file).read_text().splitlines() if line.strip()}
+    include = None
+    if args.include_ids_file:
+        include = {line.strip() for line in Path(args.include_ids_file).read_text().splitlines() if line.strip()}
+    rows = load_rows(args.dataset, args.split, exclude, args.n_prompts, args.seed, include)
+    rows = weight_by_tier(rows, args.exclude_tiers, args.tier_weights, args.seed)
+    vllm_url = f"http://127.0.0.1:{args.vllm_port}"
+    sampling = training_sampling(
+        {"temperature": args.temperature, "top_p": 1.0, "top_k": 0, "repetition_penalty": 1.0}
+    )
+    factory = make_factory(
+        sampling=sampling,
+        rows=rows,
+        llm_url=vllm_url,
+        model=args.model,
+        opencode_binary=str(args.opencode_binary),
+        episode_timeout=args.episode_timeout,
+        max_model_calls=args.max_model_calls,
+        max_model_len=args.max_model_len,
+        max_output_tokens=args.max_completion_length,
+        scratch_dir=args.scratch_dir,
+        protocol_weight=args.protocol_weight,
+    )
+    print(f"[simple] {len(rows)} papers, model {args.model}, output {args.output_dir}", flush=True)
+
+    device = torch.device("cuda")
+    model = load_inkling_model(args.model, args.attention_chunk_size).to(device)
+    model = get_peft_model(
+        model,
+        LoraConfig(r=args.lora_r, lora_alpha=2 * args.lora_r, lora_dropout=0.0, target_modules=INKLING_LORA_TARGET_MODULES),
+    )
+    model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+    model.enable_input_require_grads()
+    model.print_trainable_parameters()
+    parameters = [p for p in model.parameters() if p.requires_grad]
+    optimizer = torch.optim.AdamW(parameters, lr=args.learning_rate, weight_decay=0.0)
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda step: min(1.0, (step + 1) / max(1, args.warmup_steps)))
+
+    output = Path(args.output_dir)
+    output.mkdir(parents=True, exist_ok=True)
+    api = HfApi() if args.hub_model_id else None
+    if api:
+        api.create_repo(args.hub_model_id, private=not args.public, exist_ok=True)
+
+    def publish_adapter(step: int) -> str:
+        """Save the PEFT adapter, convert it to vLLM's names and hot-load it as `policy-v{step}`."""
+        raw = output / f"checkpoint-{step}"
+        model.save_pretrained(raw)
+        served = convert_adapter(raw, output / "served" / f"policy-v{step}")
+        name = f"policy-v{step}"
+        response = httpx.post(
+            f"{vllm_url}/v1/load_lora_adapter", json={"lora_name": name, "lora_path": str(served)}, timeout=600
+        )
+        response.raise_for_status()
+        stale = f"policy-v{step - (args.max_staleness + 1) * args.sync_every}"
+        with suppress(Exception):
+            httpx.post(f"{vllm_url}/v1/unload_lora_adapter", json={"lora_name": stale}, timeout=120)
+        return name
+
+    def describe(session: Any, started: float, **extra: Any) -> str:
+        """One-line rollout diagnostics: outcome, and per model call its duration, tokens and finish reason."""
+        calls = []
+        for message in session.messages:
+            info = message.get("info") or {}
+            if info.get("role") != "assistant":
+                continue
+            times = info.get("time") or {}
+            tokens = info.get("tokens") or {}
+            parts = [part.get("type") for part in message.get("parts", []) if part.get("type") not in ("step-start", "step-finish")]
+            calls.append({
+                "s": round(((times.get("completed") or times.get("created") or 0) - (times.get("created") or 0)) / 1000, 1),
+                "out": tokens.get("output"), "reasoning": tokens.get("reasoning"), "finish": info.get("finish"),
+                "parts": parts, "error": str(((info.get("error") or {}).get("data") or {}).get("message") or "")[:160] or None,
+            })
+        return json.dumps({
+            "arxiv": session.candidate.arxiv_id, "secs": round(time.monotonic() - started, 1), "failure": session.failure,
+            "findings": session.findings.model_dump(mode="json") if session.findings else None, "calls": calls, **extra,
+        })[:4000]
+
+    def run_rollout(row: dict[str, Any]) -> dict[str, Any] | None:
+        session = factory.create([{"role": "user", "content": user_prompt(candidate_from_row(row))}])
+        started = time.monotonic()
+        try:
+            try:
+                if session.wait_for_completion():
+                    print("[rollout] dropped " + describe(session, started), flush=True)
+                    return None
+            except TimeoutError:
+                pass  # a timed-out episode with a valid capture still scores (usually 0): long loops get no credit
+            trace = session.fetch_training_trace()
+            verdict = session.verify([])
+            if verdict.env_reward is None:
+                return None
+            reward = float(verdict.env_reward)
+            tool_calls = int(getattr(session, "tool_calls", 0) or 0)
+            if reward >= 1.0:
+                reward += W_TOOL_EFFICIENCY * max(0.0, min(1.0, 1.0 - tool_calls / TOOL_BUDGET))
+            if args.log_rollouts:
+                print("[rollout] " + describe(session, started, reward=round(reward, 3), turns=len(trace.turns)), flush=True)
+            return {
+                "reward": reward, "trace": trace, "tool_calls": tool_calls, "failure": session.failure,
+                "seconds": time.monotonic() - started,
+            }
+        except Exception as exc:  # noqa: BLE001 - unscorable rollouts are dropped, never fatal
+            logger.warning("rollout %s dropped: %s", row.get("arxiv_id"), exc)
+            with suppress(Exception):
+                print("[rollout] error " + describe(session, started, error=str(exc)[:300]), flush=True)
+            return None
+        finally:
+            session.close()
+
+    def logprobs_of(ids: list[int], positions: list[int]) -> torch.Tensor:
+        input_ids = torch.tensor([ids], device=device)
+        keep = torch.tensor([p - 1 for p in positions], device=device)
+        logits = model(input_ids=input_ids, use_cache=False, logits_to_keep=keep).logits[0].float()
+        if args.temperature != 1.0:
+            logits = logits / args.temperature
+        targets = torch.tensor([ids[p] for p in positions], device=device)
+        return torch.log_softmax(logits, dim=-1).gather(-1, targets[:, None])[:, 0]
+
+    card_base = args.card_base_model or (args.model if not Path(args.model).exists() else None)
+
+    def write_card(folder: Path, step: int | None) -> None:
+        """PEFT's card names the local base path, which the Hub rejects as `base_model`; name the Hub repo instead."""
+        lines = ["---", "library_name: peft", "tags:", "- grpo", "- inkling2", "- lora"]
+        if card_base:
+            lines.insert(1, f"base_model: {card_base}")
+        title = f"Inkling-2-Mini URL agent GRPO adapter{f' (step {step})' if step else ''}"
+        (folder / "README.md").write_text("\n".join(lines + ["---", "", f"# {title}", "",
+            f"Attention-only LoRA trained with GRPO (`train_grpo_harness.py --trainer simple`) on top of `{card_base}`.", ""]))
+
+    def push(folder: Path, path_in_repo: str, required: str) -> None:
+        """Upload and verify; a failed push is reported but never ends the run."""
+        try:
+            api.upload_folder(repo_id=args.hub_model_id, folder_path=str(folder), path_in_repo=path_in_repo,
+                              allow_patterns=["adapter_*", "README.md", "metrics.jsonl"])
+            landed = {f.rfilename for f in api.model_info(args.hub_model_id).siblings}
+            if required not in landed:
+                raise RuntimeError(f"{required} did not land")
+            print(f"[simple] pushed {path_in_repo or 'final adapter'} to {args.hub_model_id}", flush=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[simple] WARNING: push of {path_in_repo or 'final adapter'} failed: {exc}", flush=True)
+
+    metrics_path = output / "metrics.jsonl"
+    cursor = 0
+    random.Random(args.seed).shuffle(rows)
+    policy = args.model
+    with ThreadPoolExecutor(max_workers=args.max_concurrent_rollouts) as pool:
+        for step in range(1, args.max_steps + 1):
+            started = time.monotonic()
+            papers = [rows[(cursor + i) % len(rows)] for i in range(args.prompts_per_step)]
+            cursor += args.prompts_per_step
+            factory.model = policy
+            futures = [(i, pool.submit(run_rollout, paper)) for i, paper in enumerate(papers) for _ in range(args.num_generations)]
+            groups: dict[int, list[dict[str, Any]]] = {}
+            for index, future in futures:
+                result = future.result()
+                if result is not None:
+                    groups.setdefault(index, []).append(result)
+            rollout_seconds = time.monotonic() - started
+            rewards = [r["reward"] for group in groups.values() for r in group]
+            samples: list[tuple[float, list[tuple[list[int], list[int], list[float]]]]] = []
+            dropped = 0
+            for group in groups.values():
+                if len(group) < 2:
+                    continue
+                values = [r["reward"] for r in group]
+                mean = sum(values) / len(values)
+                std = math.sqrt(sum((v - mean) ** 2 for v in values) / len(values))
+                if std < 1e-6:
+                    continue
+                for result in group:
+                    chains, lost = rollout_chains(result["trace"], args.max_train_tokens)
+                    dropped += lost
+                    samples.append(((result["reward"] - mean) / (std + 1e-4), chains))
+            total_tokens = sum(len(positions) for _, chains in samples for _, positions, _ in chains)
+            max_seq_tokens = max((len(ids) for _, chains in samples for ids, _, _ in chains), default=0)
+            stats = {"ratio_sum": 0.0, "ratio_max": 0.0, "ratio_min": math.inf, "clipped": 0, "loss": 0.0}
+            model.train()
+            if total_tokens:
+                optimizer.zero_grad(set_to_none=True)
+                for advantage, chains in samples:
+                    for ids, positions, old in chains:
+                        # The looped model saves 48 layer applications (with their block-residual states) per
+                        # sequence for backward; keeping them in host memory bounds GPU memory to the weights
+                        # plus one layer's recomputation.
+                        offload = torch.autograd.graph.save_on_cpu(pin_memory=True) if args.offload_activations else nullcontext()
+                        with offload:
+                            new = logprobs_of(ids, positions)
+                        old_t = torch.tensor(old, device=device)
+                        ratio = torch.exp(new - old_t)
+                        clipped = ratio.clamp(1 - args.epsilon, 1 + args.epsilon_high)
+                        objective = torch.minimum(ratio * advantage, clipped * advantage)
+                        loss = -objective.sum() / total_tokens
+                        loss.backward()
+                        with torch.no_grad():
+                            stats["loss"] += float(loss)
+                            stats["ratio_sum"] += float(ratio.sum())
+                            stats["ratio_max"] = max(stats["ratio_max"], float(ratio.max()))
+                            stats["ratio_min"] = min(stats["ratio_min"], float(ratio.min()))
+                            stats["clipped"] += int((ratio != clipped).sum())
+                        del new, ratio, clipped, objective, loss
+                grad_norm = float(torch.nn.utils.clip_grad_norm_(parameters, 1.0))
+                optimizer.step()
+                scheduler.step()
+            else:
+                grad_norm = 0.0
+            if total_tokens and step % args.sync_every == 0:
+                policy = publish_adapter(step)
+            record = {
+                "step": step,
+                "reward_mean": sum(rewards) / len(rewards) if rewards else None,
+                "rollouts": len(rewards),
+                "trained_tokens": total_tokens,
+                "dropped_tokens": dropped,
+                "max_seq_tokens": max_seq_tokens,
+                "importance_ratio_mean": stats["ratio_sum"] / total_tokens if total_tokens else None,
+                "importance_ratio_min": stats["ratio_min"] if total_tokens else None,
+                "importance_ratio_max": stats["ratio_max"] if total_tokens else None,
+                "clip_fraction": stats["clipped"] / total_tokens if total_tokens else None,
+                "loss": stats["loss"],
+                "grad_norm": grad_norm,
+                "policy": policy,
+                "rollout_seconds": round(rollout_seconds, 1),
+                "step_seconds": round(time.monotonic() - started, 1),
+            }
+            # Collapse indicators from the harness-adapters recipe: turns and episode length per rollout.
+            finished = [r for group in groups.values() for r in group]
+            record["tool_calls_mean"] = round(sum(r["tool_calls"] for r in finished) / len(finished), 2) if finished else None
+            record["episode_seconds_mean"] = round(sum(r["seconds"] for r in finished) / len(finished), 1) if finished else None
+            record["groups_with_signal"] = sum(
+                1 for group in groups.values() if len(group) > 1 and max(r["reward"] for r in group) - min(r["reward"] for r in group) > 1e-6
+            )
+            print("[simple] " + json.dumps(record), flush=True)
+            with metrics_path.open("a") as handle:
+                handle.write(json.dumps(record) + "\n")
+            if api and step % args.save_steps == 0:
+                raw = output / f"checkpoint-{step}"
+                if not raw.exists():
+                    model.save_pretrained(raw)
+                write_card(raw, step)
+                shutil.copy(metrics_path, raw / "metrics.jsonl")
+                push(raw, f"checkpoint-{step}", f"checkpoint-{step}/adapter_model.safetensors")
+    model.save_pretrained(output)
+    write_card(output, None)
+    if api:
+        push(output, "", "adapter_model.safetensors")
 
 
 def main() -> None:
@@ -814,7 +1161,7 @@ def main() -> None:
         found = shutil.which("opencode")
         args.opencode_binary = Path(found) if found else install_opencode(Path(tempfile.mkdtemp()) / "opencode")
     if not args.launch:
-        train(args)
+        (train_simple if args.trainer == "simple" else train)(args)
         return
     vllm = start_vllm(args)
     try:
@@ -823,6 +1170,7 @@ def main() -> None:
         child_args = [arg for arg in sys.argv[1:] if arg != "--launch"]
         child_args += ["--opencode-binary", str(args.opencode_binary)]
         env = {**os.environ, "CUDA_VISIBLE_DEVICES": args.train_device}
+        env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
         code = subprocess.call([sys.executable, __file__, *child_args], env=env)
         if code:
             raise SystemExit(code)
