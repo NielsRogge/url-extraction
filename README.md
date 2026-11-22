@@ -38,6 +38,10 @@ OpenCode with a 180 s budget and at most 15 tool calls. Test has 42 papers (84 f
 | Kimi-K3.1-Pro teacher | 88.1% | - | 7.5 |
 | Inkling-2-Mini SFT + GRPO (Inkling-2-Small traces; teacher 85.7%) | 85.7% | 92.0% | 4.1 |
 
+GRPO v3 on the harder [`paper-url-extraction-v2`](https://huggingface.co/datasets/nielsr/paper-url-extraction-v2)
+(with a `test_hard` split): +4.9 points on test_hard for the 4B with 35-41% fewer tool calls, but -6.7 for the
+9B; details in the two experiment write-ups.
+
 Takeaways:
 
 - **SFT is what closes the gap.** Both students reach their teacher's accuracy with about half the tool

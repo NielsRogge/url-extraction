@@ -79,3 +79,42 @@ Notes from this run:
 - `generate_opencode_traces.py --resume-attempted` resumes without paying again for papers that were
   attempted but rejected. Trace records containing lone UTF-16 surrogates (math symbols in paper text)
   are now written in escaped form instead of crashing the worker.
+
+## GRPO v3 on paper-url-extraction-v2
+
+Same recipe as the 4B GRPO v3 run, from the published SFT adapter (merged first, since no merged 9B SFT
+checkpoint existed):
+
+```bash
+uv run pipeline.py --orchestrate --teacher kimi-k3.1-pro --student qwen3.5-9b --dataset nielsr/paper-url-extraction-v2 \
+  --run-name qwen35-9b-url-agent-v3 --sft-adapter nielsr/qwen35-9b-url-agent-lora-kimi \
+  --stages merge,probe,grpo,eval --probe-exclude-tiers 7 --probe-shards 8 --probe-args '--sample 0' \
+  --grpo-args '--learning-rate 2e-5 --max-steps 150 --exclude-tiers 7 --tier-weights 0:2,2:2,3:2,4:2,5:2,6:2' \
+  --splits test,validation,test_hard --eval-include-partial --eval-limit 1000 --eval-variants sft,grpo,teacher
+```
+
+- **Probe**: all 2,696 scoreable non-tier-7 v2 train papers, 4 attempts each (8 jobs, ~75-95 min each); mean
+  success 61%; 1,292 papers qualified (tiers 0-6: 94, 708, 157, 192, 16, 79, 46).
+- **Training reward** per 25 steps: 0.75, 0.89, 0.74, 0.75, 0.89, 0.81 (no upward trend).
+- **Evaluation** (field accuracy all / fully scoreable, tool calls; fully scoreable: test 33, validation 44,
+  test_hard 94 papers):
+
+| Model | Test | Validation | test_hard | Tool calls (test / val / hard) |
+|---|---|---|---|---|
+| SFT + GRPO v3 | 85.8% / 81.8% | 90.3% / 93.2% | 66.5% / 67.6% | 3.9 / 3.9 / 5.6 |
+| SFT (merged, paired control) | 87.0% / 93.9% | 91.4% / 95.5% | 73.2% / 75.5% | 4.0 / 3.9 / 5.2 |
+| SFT (adapter) | 87.7% / 92.4% | 89.9% / 95.5% | 71.7% / 75.0% | 4.2 / 3.7 / 5.5 |
+| Qwen3.5-9B base | 88.9% / 86.4% | 87.5% / 86.4% | 71.0% / 75.5% | 5.2 / 5.1 / 8.7 |
+| Kimi-K3.1-Pro teacher | 92.5% / 92.4% | 94.2% / 96.6% | 80.3% / 81.4% | 7.2 / 6.2 / 11.4 |
+
+GRPO v3 does not help the 9B: against its paired control it loses 1.2 points on test, 1.1 on validation and
+6.7 on test_hard (exact 98 vs 114 of 175), with unchanged tool calls. The 9B base is already strong on v2;
+SFT mainly cuts its tool calls. Likely causes to test: the pool is 55% tier 1, which the policy mostly
+solves; lr 2e-5 may be too high for the 9B; the step-50 and step-100 checkpoints in the adapter repo's history
+would show whether the drop grows with training. Cost about $175.
+
+Artifacts: [`nielsr/qwen35-9b-url-agent-v3-sft-merged`](https://huggingface.co/nielsr/qwen35-9b-url-agent-v3-sft-merged),
+[`-v3-grpo-lora`](https://huggingface.co/nielsr/qwen35-9b-url-agent-v3-grpo-lora),
+[`-v3-grpo-merged`](https://huggingface.co/nielsr/qwen35-9b-url-agent-v3-grpo-merged),
+[`-v3-eval`](https://huggingface.co/datasets/nielsr/qwen35-9b-url-agent-v3-eval) (episodes, sessions, probe, run
+manifest).

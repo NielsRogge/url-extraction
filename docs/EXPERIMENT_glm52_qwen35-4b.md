@@ -313,3 +313,48 @@ and the merged [`nielsr/qwen35-4b-url-agent-grpo-v2-merged`](https://huggingface
 SFT v2 checkpoint was mixed: test field accuracy 79.8% -> 82.1%, validation 93.0% -> 87.0%, with 25-35% fewer
 tool calls. As with the first run, accuracy differences are within the noise of 42-50 paper splits; the
 consistent effect of GRPO is shorter episodes.
+
+## GRPO v3 on paper-url-extraction-v2
+
+GRPO v3 starts from the merged SFT v2 checkpoint and trains on the v2 dataset with `pipeline.py`:
+
+```bash
+uv run pipeline.py --orchestrate --teacher glm-5.2 --student qwen3.5-4b --dataset nielsr/paper-url-extraction-v2 \
+  --run-name qwen35-4b-url-agent-v3 --sft-adapter nielsr/qwen35-4b-url-agent-lora-v2 --stages grpo,eval \
+  --grpo-ids scripts/rl-v3-ids.txt \
+  --grpo-args '--learning-rate 2e-5 --max-steps 150 --exclude-tiers 7 --tier-weights 0:2,2:2,3:2,4:2,5:2,6:2' \
+  --splits test,validation,test_hard --eval-include-partial --eval-limit 1000 --eval-variants sft,grpo,teacher
+```
+
+- **Prompt pool** (`scripts/rl-v3-ids.txt`, 748 papers): v2 train papers the SFT v2 policy solves 1-3 of 4
+  times. It is the union of two difficulty probes of the same policy under the same rollout settings: the
+  earlier probe on the validated v1 labels (664 qualified, 654 of them scoreable and outside tier 7 in v2)
+  and a 300-paper probe of v2 train (136 qualified).
+- **Training reward** per 25 steps: 0.75, 0.86, 0.96, 0.96, 0.90, 0.91.
+- **Evaluation**: every paper with at least one verified field, scored on verified fields only ("all"), and
+  the fully scoreable subset ("full": test 33, validation 44, test_hard 94 papers). Field accuracy all / full,
+  tool calls:
+
+| Model | Test | Validation | test_hard | Tool calls (test / val / hard) |
+|---|---|---|---|---|
+| SFT v2 + GRPO v3 | 89.7% / 89.4% | 93.4% / 95.5% | 78.1% / 82.4% | 3.4 / 3.3 / 4.4 |
+| SFT v2 (merged, paired control) | 90.1% / 93.9% | 91.8% / 94.3% | 73.2% / 76.1% | 5.4 / 5.6 / 6.5 |
+| SFT v2 (adapter) | 83.0% / 80.3% | 91.4% / 97.7% | 75.8% / 78.2% | 5.4 / 5.4 / 6.7 |
+| Qwen3.5-4B base | 68.8% / 75.8% | 73.2% / 77.3% | 68.4% / 70.7% | 10.0 / 10.1 / 12.2 |
+| GLM-5.2 teacher | 90.1% / 86.4% | 91.4% / 92.0% | 81.8% / 83.0% | 4.1 / 4.0 / 7.3 |
+
+GRPO v3 gains 4.9 points on test_hard and 1.6 on validation over its paired control, ties on test (same exact
+matches, 195/220), and cuts tool calls by 35-41%. It matches the teacher on test and validation and trails it
+by 3.7 points on test_hard.
+
+The SFT v2 adapter scores 7 points below the merged checkpoint of the same weights on test, almost all from
+malformed `StructuredOutput` calls. No serving difference explains it: vLLM 0.34 applies the LoRA to every
+targeted module (including the fused GDN projections), the chat templates are identical, and no generation
+hits the length limit. Two runs of the same adapter on the same 55 papers differ on 6 of them, about as much
+as adapter vs merged (7), so this is sampling noise at the default temperature 1.0. Comparing variants within
+~5 points needs several samples per paper or greedy decoding.
+
+Run notes: both original test evaluations lost most episodes to a broken OpenCode server (`posix_spawn ...
+ENOENT`); the evaluator now restarts OpenCode instead of scoring such episodes, and the test splits were rerun.
+Base-model episodes printed the job's HF token (`env | grep HF`), so the evaluation dataset stays private
+until it is republished without it; the evaluator now starts OpenCode without tokens and records are redacted.
