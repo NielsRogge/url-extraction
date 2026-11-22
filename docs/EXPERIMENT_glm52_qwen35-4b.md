@@ -347,8 +347,13 @@ sessions: [`nielsr/qwen35-4b-url-agent-v3-eval-public`](https://huggingface.co/d
 Notes from the run:
 
 - The same SFT v2 weights served as a LoRA adapter scored 83.0% on v2 test against 90.1% merged
-  (validation 91.4% vs 91.8%, test_hard 75.8% vs 73.2%). This is unexplained and under investigation; the
-  GRPO comparison uses the merged control, so it is unaffected.
+  (validation 91.4% vs 91.8%, test_hard 75.8% vs 73.2%). The test gap is almost entirely missing answers
+  (21 adapter episodes without an answer, 15 of them invalid `StructuredOutput` calls, vs 1 merged), and no
+  serving bug was found: vLLM applies the LoRA to every targeted module, including the fused Gated DeltaNet
+  projections, chat templates are identical, and no call hits the length limit. Evaluation samples at
+  temperature 1.0, and re-running the same adapter on the same papers changes about 1 paper in 10, so gaps
+  of this size on one split are sampling noise. To compare variants closer than about 5 points, evaluate
+  with 2-3 samples per paper or greedy decoding. The evaluator's vLLM is now pinned (0.34.0).
 - Two student test evaluations had to be rerun: the OpenCode server's shell stopped spawning processes
   (`posix_spawn ... ENOENT`) mid-job and those episodes were scored as failures. The evaluator now
   restarts OpenCode instead of scoring harness failures. No earlier published evaluation had this failure.
