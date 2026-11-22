@@ -11,13 +11,14 @@ Qwen students, Inkling-2-Mini reasons natively, and this time the teacher's reas
 |---|---:|---:|---:|---:|---:|---:|
 | Inkling-2-Mini base | 71.4% | 27 | 4.8 | 87.0% | 40 | 3.3 |
 | **Inkling-2-Mini SFT** (1,215 traces, adapter) | **82.1%** | **31** | 4.3 | 87.0% | 41 | 4.4 |
-| Inkling-2-Mini SFT + GRPO | _pending_ | | | | | |
+| Inkling-2-Mini SFT, merged (paired control for the row below) | 82.1% | 31 | 4.4 | 88.0% | 41 | 4.2 |
+| **Inkling-2-Mini SFT + GRPO** (90 steps) | **85.7%** | 32 | 4.1 | **92.0%** | **43** | **3.0** |
 | Inkling-2-Small teacher (DeepInfra) | **85.7%** | **34** | 7.1 | - | - | - |
 | Inkling-2-Small teacher (default routing) | 60.7% | 22 | 7.7 | - | - | - |
 
 With the validated labels (`nielsr/paper-url-extraction-v1-validated`: redirect aliases accepted, contradicted
 labels dropped; 75 test and 94 validation fields), base scores 74.7% / 89.4%, SFT 85.3% / 90.4% (exact 35/42,
-45/50) and the teacher 89.3% (38/42). `scripts/score_records.py --rescore DATASET` recomputes any record file
+45/50), merged SFT 86.7% / 90.4%, SFT + GRPO 90.7% / 94.7% (exact 37/42, 46/50) and the teacher 89.3% (38/42). `scripts/score_records.py --rescore DATASET` recomputes any record file
 against a label set.
 
 - **Teacher provider matters.** Routed through Together or OpenRouter, Inkling-2-Small often answers with an
@@ -41,14 +42,17 @@ least one requested field without a verifiable label and are scored on the remai
 |---|---:|---:|---:|---:|---:|---:|
 | Inkling-2-Mini base | 76.2% | 123 | **83.0%** | **74** | 7.9 | 33 |
 | Inkling-2-Mini SFT (adapter) | 72.1% | 115 | 77.1% | 66 | 7.9 | 38 |
-| Inkling-2-Small teacher (DeepInfra) | **80.7%** | **132** | 84.0% | 73 | 11.3 | - |
+| Inkling-2-Mini SFT, merged (paired control) | 70.6% | 113 | 76.1% | 66 | 8.5 | 42 |
+| **Inkling-2-Mini SFT + GRPO** (90 steps) | **84.8%** | **141** | **86.2%** | **75** | 7.7 | **8** |
+| Inkling-2-Small teacher (DeepInfra) | 80.7% | 132 | 84.0% | 73 | 11.3 | - |
 
-On these harder papers SFT does not help: it follows the research protocol more often (protocol-complete
+On these harder papers SFT alone does not help: it follows the research protocol more often (protocol-complete
 episodes 97 -> 109, project-page-after-GitHub violations 29 -> 15) but times out more (33 -> 38) and loses 4-6
 points of field accuracy. The paired difference is not significant (base-only exact 20 papers, SFT-only 12;
 two-sided binomial p = 0.22). The teacher needs 11.3 tool calls per paper here, so many `test_hard` papers need
 more than the student's 180 s / 15-tool budget; base Inkling-2-Mini comes within one point of the teacher on
-the fully scoreable subset.
+the fully scoreable subset. GRPO fixes exactly this (next section): the 3.4B-active student then beats its
+594B teacher on `test_hard` (84.8% vs 80.7%) with fewer tool calls (7.7 vs 11.3).
 
 ## What is different about Inkling-2-Mini
 
@@ -78,8 +82,44 @@ the fully scoreable subset.
 
 ## GRPO, following the harness-adapters recipe
 
-_Pending: difficulty probe of the merged SFT policy (4 attempts per paper under the rollout conditions, on
-the validated labels), then GRPO on the papers it solves sometimes, at LR 2e-5._
+1. **Validated tasks.** GRPO and the probe use `nielsr/paper-url-extraction-v1-validated` (`validate_labels.py`,
+   the `openenv validate` analogue: labels re-checked against current HF metadata, GitHub redirects as aliases,
+   oracle / floor / canary checks of the reward).
+2. **Difficulty probe** (`difficulty_probe.py`, 4x RTX PRO 6000 shards). The merged SFT policy attempted 300
+   papers sampled from the 788-paper candidate pool (teacher failures and project-page papers) 4 times each
+   under the rollout conditions (temperature 1.0, 4,096 output tokens, 24 model calls, 300 s). Successes per
+   paper: 0 -> 36, 1 -> 11, 2 -> 29, 3 -> 58, 4 -> 166. The 98 papers solved sometimes but not always form the
+   prompt pool (`scripts/rl-inkling-qualified-ids.txt`); tier 7 (almost never solved) is excluded and tiers are
+   reweighted (`--tier-weights 0:3,2:2,3:3,4:3,5:3,6:3`).
+3. **Training.** `train_grpo_harness.py --trainer simple` from the merged SFT model on 2x RTX PRO 6000:
+   LR 2e-5, LoRA r64 (attention only), 2 prompts x 4 rollouts per step, `--protocol-weight 0.5`, 32k-token
+   training cap, checkpoints pushed every 10 steps. The 10 h job limit stopped it at step 95 of 100;
+   checkpoint 90 is the final adapter. Training reward stayed flat (0.91 over the first and the last 20 steps;
+   every group had reward variance), but episodes got much shorter: tool calls 6.8 -> 5.4 and wall time per
+   rollout 101 s -> 47 s. The importance ratio between the vLLM sampler (NVFP4 experts) and the trainer (BF16)
+   averaged 1.00 throughout with ~5% of tokens clipped.
+
+**Results** (GRPO adapter on the merged SFT model vs the merged SFT model, same job, same papers):
+
+| Split | SFT exact | GRPO exact | GRPO-only / SFT-only solved | Timeouts SFT -> GRPO | Seconds per episode |
+|---|---:|---:|---:|---:|---:|
+| test (42) | 31 | 32 | 3 / 2 | 4 -> 1 | 94 -> 58 |
+| validation (50) | 41 | 43 | 2 / 0 | 3 -> 1 | 82 -> 41 |
+| test_hard (175) | 113 | **141** | **32 / 4** (p = 2e-6) | **42 -> 8** | 102 -> 57 |
+
+- **GRPO made the agent fast, and that is what pays off.** The policy learned to finish in about half the
+  time with fewer tool calls, which removes most 180 s evaluation timeouts. On `test_hard`, 24 of the 32 papers
+  only GRPO solves are papers where the SFT model timed out; on the 130 papers where neither timed out, GRPO
+  still solves slightly more (117 vs 111). The trade is more episodes ending at the 15-tool-call limit (11 -> 21)
+  and slightly more protocol violations (17 -> 21) on the hardest papers.
+- **This is the first GRPO run in this project that clearly improves accuracy.** The test and validation gains
+  (+3.6 and +4.0 points) are within noise on 42-50 papers, but the `test_hard` gain (+14.2 points field
+  accuracy, 113 -> 141 exact, McNemar p = 2e-6) is not. None of the `test_hard` papers are in the train split
+  or the GRPO pool. The Kimi -> Qwen3.5-9B run, which used the old pool without a difficulty probe and with
+  the default LR, saw no gain.
+- **Cost.** The GRPO job ran 10 h on 2x RTX PRO 6000 ($5.50/h, ~$55); two earlier attempts (test runs and a
+  run that crashed at step 10 on an invalid model card) cost about as much again. Steps took ~6 min
+  (rollouts ~2.5 min, the rest the synchronous update), several times slower than the Qwen runs on H200.
 
 ## Artifacts
 
@@ -90,8 +130,11 @@ All public and in the [Hub collection](https://huggingface.co/collections/nielsr
   baselines per provider; `sessions/`: agent-trace viewer sessions).
 - SFT adapter: [`nielsr/inkling-2-mini-url-agent-lora`](https://huggingface.co/nielsr/inkling-2-mini-url-agent-lora);
   merged SFT model: [`nielsr/inkling-2-mini-url-agent-sft-merged`](https://huggingface.co/nielsr/inkling-2-mini-url-agent-sft-merged).
+- GRPO adapter (on the merged SFT model, checkpoints every 10 steps): [`nielsr/inkling-2-mini-url-agent-grpo-lora`](https://huggingface.co/nielsr/inkling-2-mini-url-agent-grpo-lora);
+  merged GRPO model: [`nielsr/inkling-2-mini-url-agent-grpo-merged`](https://huggingface.co/nielsr/inkling-2-mini-url-agent-grpo-merged).
 - Evaluation records: [`nielsr/inkling-2-mini-url-agent-eval`](https://huggingface.co/datasets/nielsr/inkling-2-mini-url-agent-eval)
-  (`base/`, `sft/`, `difficulty/`).
+  (`base/`, `sft/`: base vs SFT adapter; `sft-grpo/`: merged SFT vs GRPO adapter; `difficulty/`: probe
+  attempts; `test_hard` files for every model; `sessions/`: agent-trace viewer sessions).
 
 ## Reproduce
 
@@ -112,4 +155,13 @@ scripts/inkling_job.sh eval $REV test sft/ --base-model thinkingmachines/Inkling
   --adapter nielsr/inkling-2-mini-url-agent-lora --adapter-only --max-lora-rank 64 --no-enforce-eager
 scripts/inkling_job.sh merge $REV nielsr/inkling-2-mini-url-agent-lora nielsr/inkling-2-mini-url-agent-sft-merged
 for i in 0 1 2 3; do scripts/inkling_job.sh probe $REV $i/4; done   # difficulty probe, 4x RTX PRO 6000
+REV=$(scripts/inkling_job.sh stage scripts/rl-inkling-qualified-ids.txt)
+scripts/inkling_job.sh grpo $REV           # 2x RTX PRO 6000, 13 h limit; merges and publishes when it finishes
+# If the job stops early, merge the last pushed checkpoint (copy checkpoint-N/ to the repo root first):
+scripts/inkling_job.sh merge $REV nielsr/inkling-2-mini-url-agent-grpo-lora nielsr/inkling-2-mini-url-agent-grpo-merged \
+  --base-model nielsr/inkling-2-mini-url-agent-sft-merged --card-base-model nielsr/inkling-2-mini-url-agent-sft-merged
+for s in test validation; do scripts/inkling_job.sh eval $REV $s sft-grpo/ --base-model nielsr/inkling-2-mini-url-agent-sft-merged \
+  --adapter nielsr/inkling-2-mini-url-agent-grpo-lora --max-lora-rank 64 --no-enforce-eager; done
+# test_hard: add --dataset nielsr/paper-url-extraction-v2 --include-partial --limit 500 to any eval;
+# scripts/score_records.py --fully-scoreable FILE scores the 94 fully scoreable papers.
 ```
