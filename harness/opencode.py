@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import os
 import platform
 import re
 import shutil
@@ -27,6 +28,7 @@ from typing import Any
 import httpx
 from pydantic import ValidationError
 
+from harness.credentials import CREDENTIAL_ENV_VARS, redact_credentials
 from harness.scoring import score_episode
 from harness.task import (
     SYSTEM_PROMPT,
@@ -86,7 +88,7 @@ def harness_failure(record: dict[str, Any]) -> str | None:
 
 
 def record_line(record: dict[str, Any]) -> str:
-    """One JSONL line for an episode record, written as UTF-8.
+    """One JSONL line for an episode record, written as UTF-8, with credential-shaped strings redacted.
 
     Tool output can contain lone UTF-16 surrogates (e.g. math symbols cut out of paper text), which UTF-8
     cannot encode; those records fall back to ASCII-escaped JSON, which is still valid and round-trips.
@@ -96,7 +98,7 @@ def record_line(record: dict[str, Any]) -> str:
         line.encode("utf-8")
     except UnicodeEncodeError:
         line = json.dumps(record)
-    return line + "\n"
+    return redact_credentials(line) + "\n"
 
 
 def json_text(value: Any) -> str:
@@ -332,17 +334,27 @@ def find_or_install_opencode(command: str = "opencode") -> str:
 
 
 @asynccontextmanager
-async def opencode_server(command: str = "opencode", base_url: str | None = None) -> AsyncIterator[str]:
-    """Attach to `base_url`, or run `opencode serve` in an isolated temporary workspace."""
+async def opencode_server(
+    command: str = "opencode", base_url: str | None = None, *, strip_credentials: bool = False
+) -> AsyncIterator[str]:
+    """Attach to `base_url`, or run `opencode serve` in an isolated temporary workspace.
+
+    With `strip_credentials`, the server (and so every shell the agent runs) gets no HF/API tokens in its
+    environment: an agent can and does run `env`, and its tool output ends up in published records.
+    """
     if base_url:
         yield base_url.rstrip("/")
         return
     executable = shutil.which(command) or command
     port = free_port()
     workspace = tempfile.TemporaryDirectory(prefix="url-agent-")
+    env = None
+    if strip_credentials:
+        env = {key: value for key, value in os.environ.items() if key not in CREDENTIAL_ENV_VARS}
     process = subprocess.Popen(  # noqa: ASYNC220 - startup is immediate; the process stays asynchronous
         [executable, "serve", "--hostname", "127.0.0.1", "--port", str(port)],
         cwd=workspace.name,
+        env=env,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.STDOUT,
     )

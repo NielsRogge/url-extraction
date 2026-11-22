@@ -51,8 +51,8 @@ def test_kimi_9b_jobs_match_the_old_pipeline_script():
     tags = {name.rsplit("-", 1)[0]: job for name, job in tags.items() if name.endswith("-test")}
     assert "--tag sft/" in tags["sft"].command and "--tag sft-grpo/" in tags["grpo"].command
     assert "--evaluation-label teacher" in tags["teacher"].command
-    for job in [*built["traces"], *built["eval"]]:
-        assert "--public" in job.command
+    for job in [*built["traces"], *built["eval"]]:  # datasets stay private until publish scans them
+        assert "--public" not in job.command
 
 
 def test_probe_feeds_the_grpo_prompt_pool():
@@ -145,3 +145,14 @@ def test_ids_file_is_passed_where_it_is_staged():
     assert "scripts/rl-v3-ids.txt" in staged
     assert "--include-ids-file scripts/rl-v3-ids.txt" in built["grpo"][0].command
     assert "--include-ids-file scripts/rl-v3-ids.txt" in built["probe"][0].command
+
+
+def test_publish_refuses_datasets_with_credentials(tmp_path, monkeypatch):
+    import huggingface_hub
+
+    clean, leaky = tmp_path / "clean.jsonl", tmp_path / "leaky.jsonl"
+    clean.write_text('{"output": "hf_***REDACTED***"}\n')
+    leaky.write_text('{"output": "HF_TOKEN=hf_' + "a" * 34 + '"}\n')
+    files = {"clean.jsonl": clean, "leaky.jsonl": leaky}
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", lambda repo, name, repo_type: str(files[name]))
+    assert pipeline.credential_files(None, "r", ["clean.jsonl", "leaky.jsonl", "model.bin"]) == ["leaky.jsonl"]

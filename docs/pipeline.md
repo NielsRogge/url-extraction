@@ -134,6 +134,20 @@ uv run pipeline.py --teacher kimi-k3.1-pro --student qwen3.5-9b --dataset nielsr
 - Starting from an existing SFT adapter: pass `--sft-adapter <repo>` and run from `merge` on.
 - `--grpo-merge-only` merges an already pushed GRPO adapter (recovery after a failed merge or eval).
 
+### Credentials
+
+Agents run shell commands, and some (base models especially) run `env` or print `os.environ`; their tool
+output is stored in the published records. Three safeguards, added after GRPO v3's evaluation published
+the job's HF token in raw episode records:
+
+- The evaluator and the difficulty probe start OpenCode without `HF_TOKEN` (and other API keys) in its
+  environment; the student is served by local vLLM and needs none. The teacher (trace generation and
+  teacher baselines) still needs the token to call Inference Providers, so its shell can read it.
+- Every episode record is written through `harness.opencode.record_line`, which redacts `hf_`, `sk-` and
+  `ghp_` tokens (Pi sessions were already redacted by `trace_export.py`).
+- Datasets are created private; the `publish` stage scans every text file for credential-shaped strings
+  and refuses to make a dataset public if it finds one (models are created public).
+
 ### Reproducing the existing pairs
 
 The first runs predate the naming scheme, so they pass their repo names:

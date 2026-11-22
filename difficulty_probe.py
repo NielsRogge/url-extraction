@@ -120,7 +120,7 @@ async def probe(rows: list[dict[str, Any]], args: argparse.Namespace, out: Path)
     sem = asyncio.Semaphore(args.concurrency)
     started = time.monotonic()
     finished = 0
-    async with opencode_server(str(args.opencode_binary)) as base_url, AsyncOpencode(
+    async with opencode_server(str(args.opencode_binary), strip_credentials=True) as base_url, AsyncOpencode(
         base_url=base_url, timeout=httpx.Timeout(args.episode_timeout + 120, connect=10), max_retries=1
     ) as client:
 

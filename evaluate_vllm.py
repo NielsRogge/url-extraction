@@ -265,7 +265,8 @@ async def run_model(
     """
     broken = asyncio.Event()
     async with (
-        opencode_server(str(args.opencode_binary)) as base_url,
+        # The student runs on local vLLM and needs no token; keep the job's HF_TOKEN out of the agent's shell.
+        opencode_server(str(args.opencode_binary), strip_credentials=True) as base_url,
         AsyncOpencode(
             base_url=base_url, timeout=httpx.Timeout(args.request_timeout, connect=10), max_retries=1
         ) as client,

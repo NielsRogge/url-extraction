@@ -235,7 +235,7 @@ def trace_jobs(run: Run, rev: str, args: argparse.Namespace) -> list[Job]:
             "--episode-timeout", str(settings.episode_timeout), "--max-tool-calls", str(settings.max_tool_calls),
             "--resume-attempted", "--model", q(teacher.opencode_model), "--hf-bill-to", JOB_NAMESPACE,
             "--output", f"/work/out/train-{index}.jsonl", "--output-repo", q(run.traces_repo),
-            "--path-in-repo", f"raw/train-{index}.jsonl", "--public",
+            "--path-in-repo", f"raw/train-{index}.jsonl",  # private until the publish stage scans it
         ]  # fmt: skip
         if settings.accept_partial:
             generate.append("--accept-partial")
@@ -392,7 +392,7 @@ def eval_jobs(run: Run, rev: str, args: argparse.Namespace) -> list[Job]:
     common = [
         "--dataset", q(run.dataset), "--limit", str(args.eval_limit), "--concurrency", str(EVAL_RECIPE["concurrency"]),
         "--episode-timeout", str(EVAL_RECIPE["episode_timeout"]), "--max-tool-calls", str(EVAL_RECIPE["max_tool_calls"]),
-        "--output-repo", q(run.eval_repo), "--public",
+        "--output-repo", q(run.eval_repo),  # private until the publish stage scans it
     ]  # fmt: skip
     if args.eval_include_partial:
         common.append("--include-partial")
@@ -435,7 +435,7 @@ def teacher_eval_job(run: Run, rev: str, split: str, args: argparse.Namespace) -
         "--max-tool-calls", str(EVAL_RECIPE["max_tool_calls"]), "--model", q(teacher.opencode_model),
         "--hf-bill-to", JOB_NAMESPACE, "--evaluation-label", "teacher", "--no-resume",
         "--output", f"/eval/teacher/{split}.jsonl", "--output-repo", q(run.eval_repo),
-        "--path-in-repo", f"teacher/{split}.jsonl", "--public",
+        "--path-in-repo", f"teacher/{split}.jsonl",
     ]  # fmt: skip
     if args.eval_include_partial:  # the same paper population as the evaluator's --include-partial
         generate.append("--accept-partial")
@@ -544,6 +544,22 @@ def wait(ids: list[str]) -> None:
         raise SystemExit(f"jobs did not complete: {failed}")
 
 
+def credential_files(api: Any, repo: str, files: list[str]) -> list[str]:
+    """Text files of a dataset repo containing unredacted hf_/sk-/ghp_ tokens (streamed line by line)."""
+    from huggingface_hub import hf_hub_download
+
+    from harness.credentials import CREDENTIAL_RE
+
+    leaks = []
+    for name in files:
+        if not name.endswith((".jsonl", ".json", ".md", ".txt")):
+            continue
+        with open(hf_hub_download(repo, name, repo_type="dataset"), errors="ignore") as handle:
+            if any(match for line in handle for match in CREDENTIAL_RE.findall(line) if "REDACTED" not in match):
+                leaks.append(name)
+    return leaks
+
+
 def publish(run: Run, args: argparse.Namespace) -> None:
     """Public models/datasets, private code repo, every existing artifact in the project collection."""
     from huggingface_hub import HfApi
@@ -559,12 +575,15 @@ def publish(run: Run, args: argparse.Namespace) -> None:
         if args.dry_run:
             print(f"[dry-run] {repo}: private={info.private} -> public; collection note: {note}")
             continue
-        if info.private:
-            api.update_repo_settings(repo, repo_type=kind, private=False)
         if kind == "dataset":
             files = api.list_repo_files(repo, repo_type="dataset")
             if not any(name.startswith("sessions/") for name in files):
                 raise SystemExit(f"{repo} has no agent-trace sessions; run `uv run trace_export.py --repo {repo}`")
+            leaks = credential_files(api, repo, files)
+            if leaks:  # AGENTS.md: scan before making a dataset public
+                raise SystemExit(f"{repo} contains credential-shaped strings in {leaks[:5]}; it stays private")
+        if info.private:
+            api.update_repo_settings(repo, repo_type=kind, private=False)
         api.add_collection_item(COLLECTION, item_id=repo, item_type=kind, note=note, exists_ok=True)
         print(f"published {repo} ({kind}) in the collection", flush=True)
     try:
@@ -669,7 +688,7 @@ def record_run(run: Run, rev: str, args: argparse.Namespace, argv: list[str]) ->
         print(f"[dry-run] manifest for {run.eval_repo}/pipeline/run-{rev}.json: {json.dumps(manifest)}")
         return
     api = HfApi()
-    api.create_repo(run.eval_repo, repo_type="dataset", private=False, exist_ok=True)
+    api.create_repo(run.eval_repo, repo_type="dataset", private=True, exist_ok=True)  # public after the scan
     api.upload_file(path_or_fileobj=json.dumps(manifest, indent=2).encode(), path_in_repo=f"pipeline/run-{rev}.json",
                     repo_id=run.eval_repo, repo_type="dataset", commit_message=f"Pipeline run {rev} at {args.commit}")  # fmt: skip
     print(f"recorded run manifest {run.eval_repo}/pipeline/run-{rev}.json (commit {args.commit})", flush=True)

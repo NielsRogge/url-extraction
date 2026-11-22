@@ -234,7 +234,8 @@ def test_evaluator_restarts_opencode_after_a_harness_failure(tmp_path, monkeypat
     servers: list[str] = []
 
     @asynccontextmanager
-    async def fake_server(command, base_url=None):
+    async def fake_server(command, base_url=None, strip_credentials=False):
+        assert strip_credentials  # the agent's shell must not see the job's HF token
         servers.append(command)
         yield "http://opencode"
 
@@ -263,3 +264,11 @@ def test_evaluator_restarts_opencode_after_a_harness_failure(tmp_path, monkeypat
     records = [json.loads(line) for line in output.read_text().splitlines()]
     assert len(servers) == 2 and len(records) == 3
     assert not any("posix_spawn" in json.dumps(record) for record in records)
+
+
+def test_records_never_contain_credentials():
+    from harness.opencode import record_line
+
+    token = "hf_" + "A1b2C3d4" * 4 + "xyzw1"
+    line = record_line({"tool_events": [{"response": f"HF_TOKEN={token}", "tool_input": {"command": f"curl -H 'Bearer {token}'"}}]})
+    assert token not in line and "hf_***REDACTED***" in line
