@@ -450,13 +450,26 @@ def free_port() -> int:
         return int(sock.getsockname()[1])
 
 
+# Credentials an agent can print from its environment (e.g. `env | grep HF`); never written to records.
+CREDENTIAL_RE = re.compile(r"\b(?:hf_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9_-]{20,}|ghp_[A-Za-z0-9]{20,})")
+CREDENTIAL_ENV_VARS = ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HF_HUB_TOKEN", "OPENAI_API_KEY", "GITHUB_TOKEN")
+
+
+def redact_credentials(text: str) -> str:
+    return CREDENTIAL_RE.sub(lambda match: match.group(0)[:3] + "***REDACTED***", text)
+
+
 @asynccontextmanager
-async def opencode_server(command: str) -> AsyncIterator[str]:
+async def opencode_server(command: str, *, strip_credentials: bool = False) -> AsyncIterator[str]:
+    """Run `opencode serve` in a temporary workspace. With `strip_credentials`, the server (and so every shell the
+    agent runs) gets no HF/API tokens: agents do run `env`, and tool output ends up in published records."""
     port = free_port()
     workspace = tempfile.TemporaryDirectory(prefix="url-eval-")
+    env = {k: v for k, v in os.environ.items() if k not in CREDENTIAL_ENV_VARS} if strip_credentials else None
     process = subprocess.Popen(  # noqa: ASYNC220 - process remains asynchronous after immediate startup
         [command, "serve", "--hostname", "127.0.0.1", "--port", str(port)],
         cwd=workspace.name,
+        env=env,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.STDOUT,
     )
@@ -798,7 +811,8 @@ async def evaluate(args: argparse.Namespace, output_path: Path) -> None:
         models = [("adapter", "url-agent")]
 
     async with (
-        opencode_server(str(args.opencode_binary)) as base_url,
+        # The student runs on local vLLM and needs no token; keep the job's HF_TOKEN out of the agent's shell.
+        opencode_server(str(args.opencode_binary), strip_credentials=True) as base_url,
         AsyncOpencode(
             base_url=base_url, timeout=httpx.Timeout(args.request_timeout, connect=10), max_retries=1
         ) as client,
@@ -827,7 +841,7 @@ async def evaluate(args: argparse.Namespace, output_path: Path) -> None:
                     except UnicodeEncodeError:  # lone surrogates from tool output; escaped form is still valid JSON
                         line = json.dumps(record)
                     with output_path.open("a") as handle:
-                        handle.write(line + "\n")
+                        handle.write(redact_credentials(line) + "\n")
                         handle.flush()
                     print(
                         f"  complete={record['attempt_complete']} correct={record['verification']['all_scoreable_correct']} "

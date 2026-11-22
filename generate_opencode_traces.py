@@ -42,6 +42,13 @@ from url_extraction_agent.research import (
 )
 from url_extraction_agent.schema import PaperCandidate, ToolEvent, URLFindings
 
+# Credentials an agent can print from its environment (e.g. `env | grep HF`); never written to records.
+CREDENTIAL_RE = re.compile(r"\b(?:hf_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9_-]{20,}|ghp_[A-Za-z0-9]{20,})")
+
+
+def redact_credentials(text: str) -> str:
+    return CREDENTIAL_RE.sub(lambda match: match.group(0)[:3] + "***REDACTED***", text)
+
 DEFAULT_DATASET = "nielsr/paper-url-extraction-v1"
 DEFAULT_MODEL = "huggingface/zai-org/GLM-5.3"
 ALLOWED_TOOLS = {"bash", "read", "grep", "glob", "webfetch"}
@@ -545,7 +552,8 @@ async def async_main(args: argparse.Namespace) -> None:
                     except UnicodeEncodeError:  # lone surrogates from tool output; escaped form is still valid JSON
                         line = json.dumps(record)
                     with args.output.open("a", encoding="utf-8") as handle:
-                        handle.write(line + "\n")
+                        # OpenCode needs HF_TOKEN for Inference Providers, so the agent's shell can see it: redact.
+                        handle.write(redact_credentials(line) + "\n")
                         handle.flush()
                     if args.sessions_dir:  # one Pi-format session per episode, for the Hub's agent-traces viewer
                         write_sessions([record], args.sessions_dir)
