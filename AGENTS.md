@@ -44,6 +44,9 @@ git push origin --delete claude/new-feature
 - Add it when the repo is created, with a one-line note saying what it is (teacher, student, stage).
 - Visibility: models and datasets are public. Spaces, code snapshots (repos or buckets holding job code) and this GitHub repository stay private.
 - Before making a dataset public, scan it for credentials (`hf_`, `sk-`, `ghp_` tokens); `trace_export.py` redacts HF tokens in sessions.
+  - Create episode datasets (traces, evaluations) private and make them public only after the scan passes; `pipeline.py --stages publish` does the scan and refuses on a hit. Never pass `--public` to a job that writes episodes.
+  - Agents run shell commands and may print their environment (`env`, `os.environ`). Do not give an agent's OpenCode server tokens it does not need (`opencode_server(..., strip_credentials=True)`), and write records through `harness.opencode.record_line`, which redacts tokens.
+  - If a credential is found in a public repo: make the repo private at once, do not delete anything, and tell the user to revoke the token (the repo history keeps it).
 - Agent traces must always be uploaded in a form the Hub's [agent-traces viewer](https://huggingface.co/docs/hub/en/agent-traces) can open: one Pi-format session per episode under `sessions/`, produced by `trace_export.py`. Never upload episode JSONL with full trajectories (teacher traces, evaluation episodes) on its own; slim summaries such as `difficulty_probe.py` attempts are exempt.
   - `generate_opencode_traces.py --output-repo ...` and `evaluate_vllm.py --output-repo ...` already publish the sessions; prefer them over manual uploads.
   - After any other upload (e.g. `hf upload`, bucket copies promoted to a dataset), run `uv run trace_export.py --repo <dataset>` (optionally `--files <path>`).
