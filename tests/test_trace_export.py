@@ -65,3 +65,15 @@ def test_tokens_redacted_and_filename(tmp_path):
     assert write_sessions([RECORD, {"arxiv_id": "x"}], tmp_path) == 1
     lines = (tmp_path / "2301.08243_Kimi-K3.1-Pro_a1.jsonl").read_text().splitlines()
     assert all(json.loads(line) for line in lines)
+
+
+def test_session_lines_survive_splitlines(tmp_path):
+    """The Hub viewer splits JSONL with str.splitlines(); U+2028/U+0085 inside strings must be escaped."""
+    import json
+
+    from trace_export import jsonl_line
+
+    value = {"text": "a b c\x85d\x0be\x0cf\x1cg\rh", "math": "x \ud835 y"}
+    for line in (jsonl_line(value), jsonl_line({"text": value["text"]})):
+        assert line.splitlines() == [line]
+    assert json.loads(jsonl_line({"text": value["text"]})) == {"text": value["text"]}
