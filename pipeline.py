@@ -361,7 +361,7 @@ def grpo_jobs(run: Run, rev: str, args: argparse.Namespace) -> list[list[Job]]:
     # The adapter was trained on /model, so the merge runs against the same local copy of <run>-sft-merged.
     merge = merger(
         student,
-        ["--base-model", "/model", "--adapter", q(run.grpo_adapter), "--card-base-model", q(student.model),
+        ["--base-model", "/model", "--adapter", q(run.grpo_adapter), "--card-base-model", q(run.sft_merged),  # its real base: the merged SFT model
          "--card-adapter", q(run.grpo_adapter), "--hub-model-id", q(run.grpo_merged), "--public",
          "--output", "/grpo-merged"],
     )  # fmt: skip

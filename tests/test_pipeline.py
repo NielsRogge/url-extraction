@@ -99,7 +99,7 @@ def test_inkling_jobs_use_the_image_vllm_and_hooks():
     assert "--adapter-converter inkling_adapter:convert_adapter" in evaluation.command
     train, merge_grpo = built["grpo"]
     assert "--trainer simple" in train.command and f"--card-base-model {run.sft_merged}" in train.command
-    assert "--exclude-tiers 7" in train.command and train.timeout == "14h" and "--dspark" not in train.command
+    assert "--exclude-tiers 7" in train.command and train.timeout == "13h" and "--dspark" not in train.command
     for job in (built["merge"][0], merge_grpo):  # attention merge on CPU, never on the GPU node
         assert job.flavor == "cpu-xl" and "--merge-method merge_adapter:merge_inkling" in job.command
     assert "--python-preference only-managed" in evaluation.command and "--max-lora-rank 64" in evaluation.command
@@ -156,3 +156,10 @@ def test_publish_refuses_datasets_with_credentials(tmp_path, monkeypatch):
     files = {"clean.jsonl": clean, "leaky.jsonl": leaky}
     monkeypatch.setattr(huggingface_hub, "hf_hub_download", lambda repo, name, repo_type: str(files[name]))
     assert pipeline.credential_files(None, "r", ["clean.jsonl", "leaky.jsonl", "model.bin"]) == ["leaky.jsonl"]
+
+
+def test_merged_grpo_model_card_names_the_merged_sft_model():
+    run, built = jobs(["--teacher", "inkling-2-small", "--student", "inkling-2-mini", "--stages", "grpo"])
+    train, merge = built["grpo"]
+    assert f"--card-base-model {run.sft_merged}" in train.command and f"--card-base-model {run.sft_merged}" in merge.command
+    assert train.timeout == "13h"
