@@ -48,18 +48,19 @@ student against its own merged SFT checkpoint in the same job:
 |---|---:|---:|---:|---|
 | GLM-5.2 -> Qwen3.5-4B (GRPO v3) | 73.2% | 78.1% | 81.8% | 6.5 -> 4.4, 7.3 |
 | Inkling-2-Small -> Inkling-2-Mini | 70.6% | 84.8% | 80.7% | 8.5 -> 7.7, 11.3 |
-| Kimi-K3.1-Pro -> Qwen3.5-9B | running | | | |
+| Kimi-K3.1-Pro -> Qwen3.5-9B (GRPO v3) | 73.2% | 66.5% | 80.3% | 5.2 -> 5.6, 11.4 |
 
 Takeaways:
 
 - **SFT is what closes the gap on easy papers.** Both students reach their teacher's accuracy on the
   original splits with about half the tool calls of the Kimi teacher and the same as GLM, while the
   teachers cost about $0.03 (GLM-5.2) and $0.10 (Kimi) per paper through Inference Providers.
-- **GRPO pays off on hard papers.** On the original splits its accuracy changes are within run-to-run
-  noise (at least 5 points on 42-50 papers) and it mainly shortens episodes. On `test_hard`, GRPO with a
-  difficulty-probed, hard-weighted prompt pool adds 4.9 points for the 4B and 14.2 points for
-  Inkling-2-Mini (McNemar p = 2e-6), which then beats its teacher. Faster episodes are much of the
-  mechanism: Inkling's timeouts fell from 42 to 8.
+- **GRPO can pay off on hard papers, but not reliably.** On the original splits its accuracy changes are
+  within run-to-run noise (at least 5 points on 42-50 papers) and it mainly shortens episodes. On
+  `test_hard`, GRPO with a difficulty-probed, hard-weighted prompt pool adds 4.9 points for the 4B and
+  14.2 points for Inkling-2-Mini (McNemar p = 2e-6), which then beats its teacher; faster episodes are
+  much of the mechanism (Inkling's timeouts fell from 42 to 8). The same recipe cost the 9B 6.7 points
+  with a flat training reward; the 9B base is already strong on v2 (71.0% on `test_hard`).
 - **The original benchmark is mostly easy.** Most of its papers are solved by one HF API call. Dataset v2
   adds 1,062 mined harder training papers and `test_hard` ([docs/data.md](docs/data.md)).
 
