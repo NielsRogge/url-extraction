@@ -28,7 +28,7 @@ from typing import Any
 import torch
 from datasets import Dataset, load_dataset
 from peft import LoraConfig
-from transformers import AutoTokenizer, BitsAndBytesConfig
+from transformers import AutoConfig, AutoTokenizer, BitsAndBytesConfig
 from trl import SFTConfig, SFTTrainer
 
 TOOLS = [
@@ -162,6 +162,33 @@ def normalized_messages(record: dict[str, Any]) -> list[dict[str, Any]]:
                 tool_call["function"]["arguments"] = json.loads(arguments)
         messages.append(message)
     return messages
+
+
+# Used by train_grpo_harness.train_simple (Inkling GRPO); SFT itself takes these settings from the profile.
+# Inkling 2 (inkling2_loop): attention-only LoRA. vLLM's Inkling2 LoRA can add deltas to routed experts only when
+# the experts are BF16, but its loader accepts only the checkpoint's NVFP4/MXFP8 experts, so expert adapters
+# cannot be served. The attention projections (q, k, v, o and the output gate) are served on the quantized
+# checkpoint, and the looped middle layers reuse the same adapter on each of their three passes.
+INKLING_LORA_TARGET_MODULES = (
+    r"model\.language_model\.layers\.\d+\.self_attn\.(q_proj\.linear|k_proj\.linear|v_proj\.linear|o_proj\.linear|o_proj\.gate_proj)"
+)
+
+
+def is_inkling(model_id: str) -> bool:
+    return AutoConfig.from_pretrained(model_id, trust_remote_code=True).model_type.startswith("inkling2")
+
+
+def load_inkling_model(model_id: str, attention_chunk_size: int) -> Any:
+    """Load Inkling 2 in BF16 (transformers dequantizes the NVFP4/MXFP8 experts) with chunked training attention."""
+    from transformers import AutoModelForMultimodalLM
+
+    import inkling_train_patch
+
+    inkling_train_patch.enable(chunk_size=attention_chunk_size)
+    model = AutoModelForMultimodalLM.from_pretrained(model_id, dtype=torch.bfloat16)
+    model.config.use_cache = False
+    model.config.text_config.use_cache = False
+    return model
 
 
 def render_trajectory_examples(
