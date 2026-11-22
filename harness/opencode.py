@@ -87,6 +87,10 @@ def harness_failure(record: dict[str, Any]) -> str | None:
     return None
 
 
+LINE_BREAK_ESCAPES = {"\u2028": "\\u2028", "\u2029": "\\u2029", "\x85": "\\u0085", "\x0b": "\\u000b",
+                      "\x0c": "\\u000c", "\x1c": "\\u001c", "\x1d": "\\u001d", "\x1e": "\\u001e", "\r": "\\r"}  # fmt: skip
+
+
 def record_line(record: dict[str, Any]) -> str:
     """One JSONL line for an episode record, written as UTF-8, with credential-shaped strings redacted.
 
@@ -98,6 +102,10 @@ def record_line(record: dict[str, Any]) -> str:
         line.encode("utf-8")
     except UnicodeEncodeError:
         line = json.dumps(record)
+    # Unicode line breaks (U+2028, U+0085, ...) are written raw by ensure_ascii=False, and readers that split
+    # with str.splitlines() (the Hub's dataset viewer) would cut the record in two.
+    for char, escaped in LINE_BREAK_ESCAPES.items():
+        line = line.replace(char, escaped)
     return redact_credentials(line) + "\n"
 
 
