@@ -314,47 +314,51 @@ SFT v2 checkpoint was mixed: test field accuracy 79.8% -> 82.1%, validation 93.0
 tool calls. As with the first run, accuracy differences are within the noise of 42-50 paper splits; the
 consistent effect of GRPO is shorter episodes.
 
-## GRPO v3 on paper-url-extraction-v2
+### GRPO v3: dataset v2, difficulty-probed pool
 
-GRPO v3 starts from the merged SFT v2 checkpoint and trains on the v2 dataset with `pipeline.py`:
+GRPO v3 is the first run through `pipeline.py`
+(`--stages merge,probe,grpo,eval --sft-adapter nielsr/qwen35-4b-url-agent-lora-v2`; the exact command,
+commit and pinned code snapshot are in `pipeline/run-*.json` of the eval dataset). It starts from merged
+SFT v2 ([`nielsr/qwen35-4b-url-agent-v3-sft-merged`](https://huggingface.co/nielsr/qwen35-4b-url-agent-v3-sft-merged))
+and trains on [`paper-url-extraction-v2`](https://huggingface.co/datasets/nielsr/paper-url-extraction-v2):
 
-```bash
-uv run pipeline.py --orchestrate --teacher glm-5.2 --student qwen3.5-4b --dataset nielsr/paper-url-extraction-v2 \
-  --run-name qwen35-4b-url-agent-v3 --sft-adapter nielsr/qwen35-4b-url-agent-lora-v2 --stages grpo,eval \
-  --grpo-ids scripts/rl-v3-ids.txt \
-  --grpo-args '--learning-rate 2e-5 --max-steps 150 --exclude-tiers 7 --tier-weights 0:2,2:2,3:2,4:2,5:2,6:2' \
-  --splits test,validation,test_hard --eval-include-partial --eval-limit 1000 --eval-variants sft,grpo,teacher
-```
+- Prompt pool: papers the merged SFT policy solves 1-3 times out of 4 under RL conditions. A new probe of
+  300 v2 train papers qualified 136; the earlier probe of the same policy on 1,710 v1 papers qualified 654
+  that are in v2 train. The union is 748 papers (`scripts/rl-v3-ids.txt`), tier 7 excluded, tiers 0 and
+  2-6 repeated twice so roughly half the draws are not tier 1.
+- lr 2e-5, 150 steps on 2x H200, `--protocol-weight 0.5`. Mean reward per 25 steps 0.75 -> 0.86 -> 0.96
+  -> 0.96 -> 0.90 -> 0.91, within-group std 0.36 -> 0.17.
 
-- **Prompt pool** (`scripts/rl-v3-ids.txt`, 748 papers): v2 train papers the SFT v2 policy solves 1-3 of 4
-  times. It is the union of two difficulty probes of the same policy under the same rollout settings: the
-  earlier probe on the validated v1 labels (664 qualified, 654 of them scoreable and outside tier 7 in v2)
-  and a 300-paper probe of v2 train (136 qualified).
-- **Training reward** per 25 steps: 0.75, 0.86, 0.96, 0.96, 0.90, 0.91.
-- **Evaluation**: every paper with at least one verified field, scored on verified fields only ("all"), and
-  the fully scoreable subset ("full": test 33, validation 44, test_hard 94 papers). Field accuracy all / full,
-  tool calls:
+Results on v2, field accuracy over every paper with a verified field / fully scoreable subset, tool calls:
 
-| Model | Test | Validation | test_hard | Tool calls (test / val / hard) |
-|---|---|---|---|---|
-| SFT v2 + GRPO v3 | 89.7% / 89.4% | 93.4% / 95.5% | 78.1% / 82.4% | 3.4 / 3.3 / 4.4 |
-| SFT v2 (merged, paired control) | 90.1% / 93.9% | 91.8% / 94.3% | 73.2% / 76.1% | 5.4 / 5.6 / 6.5 |
-| SFT v2 (adapter) | 83.0% / 80.3% | 91.4% / 97.7% | 75.8% / 78.2% | 5.4 / 5.4 / 6.7 |
-| Qwen3.5-4B base | 68.8% / 75.8% | 73.2% / 77.3% | 68.4% / 70.7% | 10.0 / 10.1 / 12.2 |
-| GLM-5.2 teacher | 90.1% / 86.4% | 91.4% / 92.0% | 81.8% / 83.0% | 4.1 / 4.0 / 7.3 |
+| Model | test (220) | validation (213) | test_hard (175) |
+|---|---|---|---|
+| Qwen3.5-4B base | 68.8% | 73.2% | 68.4% (12.2) |
+| SFT v2, merged | 90.1% / 93.9% (5.4) | 91.8% / 94.3% (5.6) | 73.2% / 76.1% (6.5) |
+| SFT v2 + GRPO v3 | 89.7% / 89.4% (3.4) | 93.4% / 95.5% (3.3) | 78.1% / 82.4% (4.4) |
+| GLM-5.2 teacher | 90.1% / 86.4% (4.1) | 91.4% / 92.0% (4.0) | 81.8% / 83.0% (7.3) |
 
-GRPO v3 gains 4.9 points on test_hard and 1.6 on validation over its paired control, ties on test (same exact
-matches, 195/220), and cuts tool calls by 35-41%. It matches the teacher on test and validation and trails it
-by 3.7 points on test_hard.
+GRPO v3 gains 4.9 points over its merged SFT control on `test_hard` (6.3 on the 94 fully scoreable
+papers), 1.6 on validation, and is level on test (195/220 exact for both), with 35-41% fewer tool calls on
+every split. Models: [`-v3-grpo-lora`](https://huggingface.co/nielsr/qwen35-4b-url-agent-v3-grpo-lora),
+[`-v3-grpo-merged`](https://huggingface.co/nielsr/qwen35-4b-url-agent-v3-grpo-merged); episodes and
+sessions: [`nielsr/qwen35-4b-url-agent-v3-eval-public`](https://huggingface.co/datasets/nielsr/qwen35-4b-url-agent-v3-eval-public).
 
-The SFT v2 adapter scores 7 points below the merged checkpoint of the same weights on test, almost all from
-malformed `StructuredOutput` calls. No serving difference explains it: vLLM 0.34 applies the LoRA to every
-targeted module (including the fused GDN projections), the chat templates are identical, and no generation
-hits the length limit. Two runs of the same adapter on the same 55 papers differ on 6 of them, about as much
-as adapter vs merged (7), so this is sampling noise at the default temperature 1.0. Comparing variants within
-~5 points needs several samples per paper or greedy decoding.
+Notes from the run:
 
-Run notes: both original test evaluations lost most episodes to a broken OpenCode server (`posix_spawn ...
-ENOENT`); the evaluator now restarts OpenCode instead of scoring such episodes, and the test splits were rerun.
-Base-model episodes printed the job's HF token (`env | grep HF`), so the evaluation dataset stays private
-until it is republished without it; the evaluator now starts OpenCode without tokens and records are redacted.
+- The same SFT v2 weights served as a LoRA adapter scored 83.0% on v2 test against 90.1% merged
+  (validation 91.4% vs 91.8%, test_hard 75.8% vs 73.2%). The test gap is almost entirely missing answers
+  (21 adapter episodes without an answer, 15 of them invalid `StructuredOutput` calls, vs 1 merged), and no
+  serving bug was found: vLLM applies the LoRA to every targeted module, including the fused Gated DeltaNet
+  projections, chat templates are identical, and no call hits the length limit. Evaluation samples at
+  temperature 1.0, and re-running the same adapter on the same papers changes about 1 paper in 10, so gaps
+  of this size on one split are sampling noise. To compare variants closer than about 5 points, evaluate
+  with 2-3 samples per paper or greedy decoding. The evaluator's vLLM is now pinned (0.34.0).
+- Two student test evaluations had to be rerun: the OpenCode server's shell stopped spawning processes
+  (`posix_spawn ... ENOENT`) mid-job and those episodes were scored as failures. The evaluator now
+  restarts OpenCode instead of scoring harness failures. No earlier published evaluation had this failure.
+- Base-model episodes ran `env` inside OpenCode and printed the job's HF token into raw eval records, which
+  were briefly public. The token was revoked; evaluation and probing now start OpenCode without
+  credentials, every written record is redacted, and datasets stay private until a credential scan passes
+  (see AGENTS.md). The eval was republished from redacted files to a fresh repository.
+

@@ -13,7 +13,7 @@ from pathlib import Path
 
 from huggingface_hub import snapshot_download
 
-MODEL = os.environ.get("STUDENT_MODEL", "nielsr/qwen35-4b-url-agent-grpo-v2-merged")
+MODEL = os.environ.get("STUDENT_MODEL", "nielsr/qwen35-4b-url-agent-v3-grpo-merged")
 TOKEN_FILE = Path("/tmp/.hf_token")
 
 
