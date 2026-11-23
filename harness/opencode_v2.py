@@ -13,6 +13,9 @@ OpenCode 2 replaced the 1.x HTTP API. What the harness does differently (see doc
   message (the contract and schema are in `harness.task.system_prompt_v2`), parsed and validated by the same
   `URLFindings` model.
 - Prompts are asynchronous: post the prompt, then wait for the session to go idle.
+- Every episode runs on its own server (`harness.opencode.isolated_episode_server`): OpenCode 2 spills long shell
+  output to files in its data directory and the agent reads them back, so episodes sharing a server read (and once
+  deleted) each other's files.
 - Messages are flat (`{id, type, content: [...]}`, one assistant message per model step). `normalize_messages`
   converts them to the 1.x `{info, parts}` shape, so tool events, scoring, the portable SFT trajectory and the Pi
   session export are shared with 1.x. Tool names are kept as OpenCode 2 reports them (`shell`, not `bash`).
@@ -286,16 +289,25 @@ async def run_one(
     """Run one paper in OpenCode 2 and return its scored episode record (same format as 1.x)."""
     from harness.opencode import build_record
 
+    from harness.opencode import OpenCodeV2Client, isolated_episode_server
+
     candidate = candidate_from_row(row)
     started = time.monotonic()
-    session_id, messages, failure, _ = await run_session(
-        client,
-        model,
-        user_prompt(candidate),
-        title=f"{title} {candidate.arxiv_id}",
-        episode_timeout=episode_timeout,
-        max_tool_calls=max_tool_calls,
+    session_args = dict(
+        title=f"{title} {candidate.arxiv_id}", episode_timeout=episode_timeout, max_tool_calls=max_tool_calls
     )
+    server = getattr(client, "server", None)
+    if server is not None and server.executable:
+        # A server started by `opencode_server`: run the episode on its own server (see isolated_episode_server).
+        async with (
+            isolated_episode_server(server) as episode_server,
+            OpenCodeV2Client(episode_server, timeout=client.timeout) as episode_client,
+        ):
+            session_id, messages, failure, _ = await run_session(
+                episode_client, model, user_prompt(candidate), **session_args
+            )
+    else:
+        session_id, messages, failure, _ = await run_session(client, model, user_prompt(candidate), **session_args)
     return build_record(
         row,
         f"{model[0]}/{model[1]}",

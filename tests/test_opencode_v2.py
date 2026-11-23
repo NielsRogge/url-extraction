@@ -172,6 +172,67 @@ def test_evaluator_runs_a_v2_batch(tmp_path, monkeypatch) -> None:
     assert ("GET", "/api/info", None) in fake.requests
 
 
+def test_each_episode_gets_its_own_server(monkeypatch) -> None:
+    """Episodes on a server started by `opencode_server` run on their own server (own workspace and data dir):
+    on a shared one, agents read each other's spilled shell output and one `rm -rf` broke the whole batch."""
+    from contextlib import asynccontextmanager
+
+    data, messages, response = EPISODES["correct_and_complete"]
+    fakes: list[FakeOpenCodeV2] = []
+    started: list[OpenCodeServer] = []
+    stopped: list[str] = []
+
+    class MockClient(OpenCodeV2Client):
+        def __init__(self, server: OpenCodeServer, **kwargs: Any) -> None:
+            fakes.append(FakeOpenCodeV2(to_v2(messages, response)))
+            super().__init__(server, transport=httpx.MockTransport(fakes[-1]), **kwargs)
+
+    @asynccontextmanager
+    async def episode_server(server: OpenCodeServer, **kwargs: Any):
+        assert server.executable == "/bin/opencode" and server.strip_credentials
+        episode = OpenCodeServer(f"http://episode-{len(started)}", V2, "pw", f"/tmp/episode-{len(started)}")
+        started.append(episode)
+        try:
+            yield episode
+        finally:
+            stopped.append(episode.url)
+
+    monkeypatch.setattr(opencode, "OpenCodeV2Client", MockClient)
+    monkeypatch.setattr(opencode, "isolated_episode_server", episode_server)
+    shared = OpenCodeServer("http://shared", V2, "secret", "/tmp/shared", executable="/bin/opencode",
+                            strip_credentials=True)  # fmt: skip
+
+    async def go() -> list[dict[str, Any]]:
+        async with MockClient(shared, timeout=30) as client:
+            return await asyncio.gather(*(
+                evaluate_vllm.run_one(client, data, ("provider", "model"), episode_timeout=30, max_tool_calls=15)
+                for _ in range(3)
+            ))  # fmt: skip
+
+    records = asyncio.run(go())
+    assert all(record["accepted"] for record in records)
+    assert len(started) == 3 and len({s.workspace for s in started}) == 3 and len(stopped) == 3
+    assert fakes[0].requests == []  # nothing ran on the shared server
+    for fake, server in zip(fakes[1:], started):
+        create = next(body for method, path, body in fake.requests if path == "/api/session")
+        assert create["location"] == {"directory": server.workspace}
+
+
+def test_opencode_server_records_how_to_start_episode_servers(monkeypatch) -> None:
+    monkeypatch.setattr(opencode, "require_opencode_version", lambda executable, version: version)
+    monkeypatch.setattr(opencode, "start_opencode", lambda executable, version, workspace, env, **kw: (
+        type("P", (), {"pid": 0})(), OpenCodeServer("http://x", version, "pw", workspace)))  # fmt: skip
+    monkeypatch.setattr(opencode, "stop_process", lambda process, **kw: None)
+
+    async def go(version: str) -> OpenCodeServer:
+        async with opencode.opencode_server("/bin/opencode", strip_credentials=True, version=version) as server:
+            return server
+
+    v2 = asyncio.run(go(V2))
+    assert v2.executable == "/bin/opencode" and v2.strip_credentials
+    assert asyncio.run(go("1.2.4")).executable is None
+
+
 def test_permissions_hide_everything_but_the_research_tools() -> None:
     def hidden(action: str, rules: list[dict[str, str]]) -> bool:  # OpenCode's `whollyDisabled`
         import fnmatch

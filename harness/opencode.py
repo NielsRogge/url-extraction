@@ -25,7 +25,7 @@ import time
 import urllib.request
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -432,6 +432,10 @@ class OpenCodeServer:
     version: str = OPENCODE_VERSION
     password: str | None = None  # v2 only; HTTP Basic auth as user "opencode"
     workspace: str | None = None
+    # v2 servers started by `opencode_server`: how to start one more, so that every episode gets its own server,
+    # workspace and data directory (`isolated_episode_server`). None for attached servers.
+    executable: str | None = None
+    strip_credentials: bool = False
 
     @property
     def api(self) -> int:
@@ -568,11 +572,40 @@ async def opencode_server(
     workspace = tempfile.TemporaryDirectory(prefix="url-agent-")
     env = server_env(version, workspace=workspace.name, strip_credentials=strip_credentials)
     process, server = await asyncio.to_thread(start_opencode, executable, version, workspace.name, env, startup_timeout=30)
+    if opencode_api(version) == 2:
+        server = replace(server, executable=executable, strip_credentials=strip_credentials)
     try:
         yield server
     finally:
         stop_process(process)
         workspace.cleanup()
+
+
+@asynccontextmanager
+async def isolated_episode_server(server: OpenCodeServer, *, startup_timeout: float = 60) -> AsyncIterator[OpenCodeServer]:
+    """A fresh 2.x server for one episode: own workspace, data directory and process group.
+
+    OpenCode 2 writes long shell output to files in its data directory (`.../opencode/shell/<project>/sh_*.out`)
+    and the agent reads them back. With one server shared by concurrent episodes, agents found and read other
+    episodes' output files, and one `rm -rf` of that directory broke every episode running beside it. Each
+    episode therefore runs on its own server, which is stopped with every shell it spawned when the episode ends.
+    """
+    if not server.executable:
+        raise ValueError("isolated_episode_server needs a server started by opencode_server")
+    workspace = tempfile.TemporaryDirectory(prefix="url-episode-")
+    try:
+        env = server_env(server.version, workspace=workspace.name, strip_credentials=server.strip_credentials)
+        process, episode = await asyncio.to_thread(
+            start_opencode, server.executable, server.version, workspace.name, env,
+            startup_timeout=startup_timeout, new_session=True,
+        )  # fmt: skip
+        try:
+            yield episode
+        finally:
+            await asyncio.to_thread(stop_process, process, group=True)
+    finally:
+        with suppress(OSError):
+            workspace.cleanup()
 
 
 class OpenCodeV2Client(httpx.AsyncClient):

@@ -53,6 +53,16 @@ captured with a fake OpenAI-compatible endpoint.
   - The messages are converted to the 1.x `{info, parts}` shape, so the scorer, the SFT trajectory, the
     GRPO reward and the Pi session export are shared. Tool names are kept (`shell`); the scorer already
     treated `shell` like `bash`.
+- **One server per episode.** OpenCode 2 writes long shell output to files in its data directory
+  (`<XDG_DATA_HOME>/opencode/shell/<project>/sh_*.out`) and tells the agent to `read`/`grep` them; about half
+  of the accepted GLM-5.3 traces do this. The first evaluation ran 8 concurrent episodes on one server with one
+  shared workspace (as 1.x did), so agents found and read other episodes' output files (`find /tmp -name
+  "*.out"`), and one base-model episode ran `rm -rf .../opencode/shell`, which broke the tool calls of every
+  episode running beside it (tool success fell to 45-60%). Each 2.x episode in the evaluator, the trace
+  generator and the probe now starts its own server with its own workspace and data directory
+  (`harness.opencode.isolated_episode_server`), killed with its process group when the episode ends. GRPO
+  rollouts already did this. The shell still runs as the job's user, so an agent that deliberately searches
+  `/tmp` can still see other episodes' workspaces; nothing is shared by default any more.
 - **System prompt.** It is identical to 1.x except for "You may use Shell, ..." and the answer contract (a
   JSON-only final message with the schema). OpenCode's 1.x base prompt (11.7k characters of coding-agent
   instructions) is gone, so every turn's prompt is much shorter.
