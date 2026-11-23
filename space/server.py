@@ -35,6 +35,7 @@ from core import (
     start_opencode,
     student_model_id,
 )
+from student_status import StudentStatus
 
 STATIC = Path(__file__).parent / "static"
 MAX_RACES = int(os.environ.get("MAX_CONCURRENT_RACES", "2"))
@@ -237,14 +238,24 @@ async def hf_cli_self_test() -> None:
     print(f"[server] hf CLI self-test: {'ok' if HF_CLI['ok'] else 'FAILED: ' + text[-300:]}", flush=True)
 
 
+# STUDENT_ENDPOINT ("namespace/name") skips discovering the Inference Endpoint from STUDENT_URL.
+STUDENT_STATUS = StudentStatus(core.STUDENT_URL, core.HF_TOKEN, os.environ.get("STUDENT_ENDPOINT", "").strip())
+
+
 @app.get("/api/status")
 async def status() -> JSONResponse:
-    ready = False
-    with suppress(Exception):
-        async with httpx.AsyncClient(timeout=3) as client:
-            ready = (await client.get(f"{core.STUDENT_URL}/health")).status_code == 200
+    # Asks the Inference Endpoints API (or the local vLLM's /health), never the endpoint itself, so a page
+    # load does not wake a scaled-to-zero student.
+    student = await STUDENT_STATUS.get()
     return JSONResponse(
-        {"student_ready": ready, "student": STUDENT_LABEL, "teacher": TEACHER_MODEL, "hf_cli_ok": HF_CLI["ok"]}
+        {
+            "student_ready": student["state"] == "ready",
+            "student_state": student["state"],
+            "student_state_detail": student["detail"],
+            "student": STUDENT_LABEL,
+            "teacher": TEACHER_MODEL,
+            "hf_cli_ok": HF_CLI["ok"],
+        }
     )
 
 

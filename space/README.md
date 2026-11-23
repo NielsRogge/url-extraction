@@ -31,6 +31,13 @@ the last race.
 | `STUDENT_MODEL` | variable | Student checkpoint to serve. |
 | `STUDENT_LABEL` | variable | Student name shown in the race panel. |
 | `TEACHER_MODEL` | variable | Teacher model on Inference Providers. |
+| `STUDENT_URL` | variable | Optional external student (e.g. an authenticated Inference Endpoint URL) instead of local vLLM. |
+| `STUDENT_ENDPOINT` | variable | Optional `namespace/name` of that Inference Endpoint; otherwise it is found by URL in the token's namespaces. |
+
+`/api/status` reports `student_state` (`ready`, `asleep`, `starting`, `unavailable` or `unknown`). For an
+Inference Endpoint it reads the state from the Inference Endpoints API rather than calling the endpoint, so
+loading the page never wakes a scaled-to-zero student; the token needs read access to Inference Endpoints for
+this (without it the state is `unknown`).
 
 The agents execute shell commands and read untrusted web pages in this container, so the token is
 moved into a one-time file by `start.sh` and removed from every process environment; vLLM and the
