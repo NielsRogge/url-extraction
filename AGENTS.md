@@ -4,11 +4,11 @@ Instructions for coding agents (Claude Code, Codex, Cursor, etc.) working in thi
 
 ## Branches and worktrees
 
-- Give each feature request and non-hotfix bug fix an isolated worktree and a dedicated `<agent>/<short-feature-name>` branch, where `<agent>` is the name of the coding agent doing the work (for example `codex/…`, `claude/…`, `cursor/…`).
-- If the agent supplies a detached-HEAD worktree, create the branch before the first commit.
-- Do not develop independent features in the primary `main` checkout.
+- Develop each feature request and non-hotfix bug fix on a dedicated `<agent>/<short-feature-name>` branch, where `<agent>` is the name of the coding agent doing the work (for example `codex/…`, `claude/…`, `cursor/…`). Never commit independent features directly to `main`.
+- If several agents may work in the same local checkout at once, give each its own worktree: the Claude Desktop app's **Worktree** option, `claude --worktree <name>`, or `git worktree add`. Cloud sessions (for example Claude Code on the web) already run in an isolated clone and only need the branch.
+- If the agent supplies a detached-HEAD checkout or worktree, create the branch before the first commit.
 
-Example:
+Example of a manual worktree:
 
 ```bash
 git fetch origin main
@@ -25,11 +25,11 @@ Always bill Hugging Face services to the `huggingface` org, never to a personal 
 
 ## Cleanup after release
 
-- Once the task's merged commit is live in production and its smoke checks pass, remove the task's worktree and delete its local and remote branch.
-- First confirm the worktree is clean and that `main` contains the branch's changes (for a squash merge, compare the branch diff against the merge commit's diff).
-- Clean up only the task's own worktree and branch.
+- Once the task's merged commit is live in production and its smoke checks pass, delete the task's local and remote branch, and remove its worktree if one was created.
+- First confirm the checkout is clean and that `main` contains the branch's changes (for a squash merge, compare the branch diff against the merge commit's diff).
+- Clean up only the task's own branch and worktree.
 
-Example:
+Example (with a manual worktree):
 
 ```bash
 git -C ../url-extraction-new-feature status --porcelain   # must be empty
@@ -42,7 +42,8 @@ git push origin --delete claude/new-feature
 
 - Every artifact this project publishes on the Hugging Face Hub (models, adapters, datasets, trace and evaluation datasets, and Spaces) must be added to the project collection: https://huggingface.co/collections/nielsr/paper-url-agent-frontier-to-small-distillation-6b01c8378db0ff55d524014e
 - Add it when the repo is created, with a one-line note saying what it is (teacher, student, stage).
-- Visibility: models and datasets are public. Spaces, code snapshots (repos or buckets holding job code) and this GitHub repository stay private.
+- Visibility: models, datasets and this GitHub repository are public. Spaces and code snapshots (repos or buckets holding job code) stay private.
+- This repository is public: never commit credentials, `.env` files, agent settings (`.claude/settings.local.json`), raw episode or trace data, or the contents of private or internal datasets. Data lives on the Hub; refer to private resources by name only. Scan the diff for credential patterns before pushing; a credential that reaches git history must be revoked, because the history keeps it.
 - Before making a dataset public, scan it for credentials (`hf_`, `sk-`, `ghp_` tokens); `trace_export.py` redacts HF tokens in sessions.
   - Create episode datasets (traces, evaluations) private and make them public only after the scan passes; `pipeline.py --stages publish` does the scan and refuses on a hit. Never pass `--public` to a job that writes episodes.
   - Agents run shell commands and may print their environment (`env`, `os.environ`). Do not give an agent's OpenCode server tokens it does not need (`opencode_server(..., strip_credentials=True)`), and write records through `harness.opencode.record_line`, which redacts tokens.
