@@ -21,7 +21,8 @@ profiles/teachers/*.toml  profiles/students/*.toml      pipeline.py  (stages -> 
 |---|---|
 | `harness/task.py` | System prompt (`system_prompt.txt`), user prompt, `URLFindings` answer schema (strict `^https?://` URLs, quoted `null` normalized), `PaperCandidate`, `ToolEvent` |
 | `harness/scoring.py` | `canonical_url`, `score_findings` (reference aliases; no answer = every verified field wrong), `derive_attempt_complete` (research protocol), `score_episode` (both, plus the tool-call limit), the GRPO reward (`env_reward`, `tool_efficiency_bonus`, shortcut guard) |
-| `harness/opencode.py` | OpenCode tools, permissions and request body; `run_one` (one episode with watchdog and structured-output fallback); `build_record`; `portable_trajectory` (keeps reasoning as `reasoning_content`); OpenCode install and server |
+| `harness/opencode.py` | Supported OpenCode versions (1.2.4, 2.3.2) with pinned sha256 and version checks; OpenCode tools, permissions and request body (1.x); `run_one` (one episode with watchdog and structured-output fallback; dispatches to 2.x); `build_record`; `portable_trajectory` (keeps reasoning as `reasoning_content`); OpenCode install, server and client |
+| `harness/opencode_v2.py` | OpenCode 2.x: `url-agent` config agent (system prompt, permission rules), `/api` episode loop, v2 -> 1.x message normalization (see [the OpenCode v2 experiment](EXPERIMENT_glm53_qwen35-4b_opencode2.md#opencode-124---232-what-changed-for-this-harness)) |
 | `harness/report.py` | Evaluation summary (`summarize`, McNemar) and `rescore` of published records |
 | `harness/profiles.py` | Profile schema and loader |
 | `harness/hooks.py` | Resolves profile hooks given as `module:function` |
@@ -58,13 +59,14 @@ Teacher (`profiles/teachers/<name>.toml`):
 | `opencode_model` | OpenCode `provider/model`; a provider pin is part of the id (`...:deepinfra`) |
 | `provider` | the pinned Inference Provider, for documentation |
 | `[opencode_model_entry]` | inline OpenCode model declaration, needed for ids not in OpenCode's catalog (pinned ids) |
+| `opencode_version` | optional pin of the OpenCode release (`1.2.4` or `2.3.2`) for runs with this teacher |
 | `[traces]` | `concurrency`, `attempts_per_row`, `accept_partial`, `episode_timeout`, `max_tool_calls`, `shards`, `flavor`, `timeout`, `baseline_concurrency` (teacher evaluation baseline, default 4) |
 
 Student (`profiles/students/<name>.toml`):
 
 | Section | Fields |
 |---|---|
-| top level | `model`, `requires` (extra repo files its hooks need; a run refuses to start without them) |
+| top level | `model`, `requires` (extra repo files its hooks need; a run refuses to start without them), `opencode_version` (optional pin) |
 | `[serve]` | `image`, `vllm` (`pep723`: scripts install vLLM; `image`: use the image's `vllm`), `flavor`, `timeout`, `deps`, `tool_call_parser`, `reasoning_parser`, `enforce_eager`, `language_model_only`, `max_model_len`, `max_output_tokens`, `gpu_memory_utilization`, `vllm_extra_args` |
 | `[lora]` | `rank`, `sft_target_modules` (comma list or regex), `grpo_target_modules`, `adapter_converter` (`module:function(src, dst)` making an adapter servable by vLLM) |
 | `[sft]` | `image`, `flavor`, `timeout`, `deps` (empty: the script's PEP 723 deps), `model_class`, `train_patch` (module with `enable(chunk_size=...)`), `keep_reasoning`, `args` |
@@ -77,6 +79,7 @@ Current profiles:
 | Profile | Notable settings |
 |---|---|
 | `glm-5.2` | `huggingface/zai-org/GLM-5.2`, automatic routing |
+| `glm-5.3` | `huggingface/zai-org/GLM-5.3`, automatic routing (in OpenCode 2.3.2's bundled catalog) |
 | `kimi-k3.1-pro` | `huggingface/moonshotai/Kimi-K3.1-Pro` (served by Together) |
 | `inkling-2-small` | pinned to DeepInfra (`:deepinfra`; inline model entry with `temperature`, limits and `cost`, without which OpenCode records $0), 6 concurrent sessions for distillation, 4 for the test baseline |
 | `qwen3.5-4b` | all defaults: PyPI vLLM, `qwen3_coder`, text-only LoRA r32, H200 SFT/eval, 2x H200 TRL GRPO with 32 rollouts |
@@ -114,7 +117,10 @@ uv run pipeline.py --teacher kimi-k3.1-pro --student qwen3.5-9b --dataset nielsr
 - Any dataset with the `nielsr/paper-url-extraction-v1` schema works (`--dataset`), and any split can be
   evaluated: `--splits test,validation,test_hard`. Evaluation takes the first `--eval-limit` (50) fully
   scoreable papers of each split.
-- `<run>` defaults to `<student>-url-agent-<teacher>` under `--namespace` (nielsr). Override single repos
+- `--opencode-version` (`1.2.4`, the default, or `2.3.2`) pins the OpenCode release of every stage (traces,
+  SFT tool schemas, probe, GRPO rollouts, evaluation); a profile may pin it instead. It is recorded in the run
+  manifest, every episode record and the dataset cards. Scripts never use another `opencode` on PATH.
+- `<run>` defaults to `<student>-url-agent-<teacher>` (plus `-oc2` in OpenCode 2.x) under `--namespace` (nielsr). Override single repos
   with `--traces-repo`, `--sft-adapter`, `--sft-merged`, `--grpo-adapter`, `--grpo-merged`, `--eval-repo`.
 - Code is staged to the private `<run>-code` model repo under `code/<rev>/`: the stage scripts, the whole
   `harness/` package, `trace_export.py`, the student's `requires` files and the `--grpo-ids` pool.
