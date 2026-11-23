@@ -65,8 +65,12 @@ def main() -> None:
         shutil.copytree(ROOT / "harness", bundle / "harness", ignore=shutil.ignore_patterns("__pycache__", "profiles.py"))
         api.upload_folder(repo_id=args.space, repo_type="space", folder_path=str(bundle),
                           ignore_patterns=[".gitignore"], commit_message=f"Serve {args.model}")  # fmt: skip
-    api.request_space_hardware(args.space, hardware, sleep_time=3600)
-    print(f"Space updated; hardware {hardware}, sleeps after 1 h idle")
+    if hardware == "cpu-basic":  # free tier; its sleep time cannot be changed
+        api.request_space_hardware(args.space, hardware)
+        print(f"Space updated; hardware {hardware}")
+    else:
+        api.request_space_hardware(args.space, hardware, sleep_time=3600)
+        print(f"Space updated; hardware {hardware}, sleeps after 1 h idle")
 
 
 if __name__ == "__main__":
