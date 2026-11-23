@@ -49,40 +49,46 @@ app.mount("/static", StaticFiles(directory=STATIC), name="static")
 # --------------------------------------------------------------------------------------------------
 
 
+BASH_DOING = (
+    ("hf papers info", "checking the paper's Hub metadata"),
+    ("hf papers read", "reading the paper"),
+    ("hf ", "querying the Hub"),
+    ("curl", "downloading a page"),
+)
+
+
 def classify(part: dict[str, Any]) -> tuple[str, str, str]:
-    """(verb shown in the row, argument shown after it, what the agent is doing, for the caption)."""
+    """(OpenCode tool name shown in the row, its argument, what the agent is doing, for the caption).
+
+    The row shows the real tool name (`bash`, `webfetch`, `read`, `grep`, `glob`) with the full command or
+    argument, so `hf papers read ...` appears as `bash  hf papers read ...`. The final StructuredOutput
+    call is shown as `answer`.
+    """
     state = part.get("state") or {}
     data = state.get("input") or {}
-    name = part.get("tool", "")
+    name = part.get("tool", "") or "tool"
+    verb = "answer" if name == "StructuredOutput" else name
     if state.get("status") in (None, "pending", "running") and (not data or name == "StructuredOutput"):
         # Arguments stream in as partial JSON (an answer's reasoning arrives before its URLs), so a call
         # is only shown once its input is complete.
-        verb = {"bash": "shell", "webfetch": "fetch", "StructuredOutput": "answer"}.get(name, name or "tool")
         return verb, "writing…", "writing its answer" if name == "StructuredOutput" else "writing a tool call"
     if name == "bash":
         command = str(data.get("command") or "").strip()
-        if command.startswith("hf papers info"):
-            return "hf", command[3:], "checking the paper's Hub metadata"
-        if command.startswith("hf papers read"):
-            return "hf", command[3:], "reading the paper"
-        if command.startswith("hf "):
-            return "hf", command[3:], "querying the Hub"
-        if command.startswith("curl"):
-            return "curl", command[5:], "downloading a page"
-        return "shell", command, "running a shell command"
+        doing = next((d for prefix, d in BASH_DOING if command.startswith(prefix)), "running a shell command")
+        return verb, command, doing
     if name == "webfetch":
-        return "fetch", str(data.get("url") or ""), "opening a web page"
+        return verb, str(data.get("url") or ""), "opening a web page"
     if name == "read":
-        return "read", str(data.get("filePath") or ""), "reading a file"
+        return verb, str(data.get("filePath") or ""), "reading a file"
     if name == "grep":
-        return "grep", str(data.get("pattern") or ""), "searching text"
+        return verb, str(data.get("pattern") or ""), "searching text"
     if name == "glob":
-        return "glob", str(data.get("pattern") or ""), "listing files"
+        return verb, str(data.get("pattern") or ""), "listing files"
     if name == "StructuredOutput":
         urls = [data.get("github_url"), data.get("project_page_url")]
         urls = [str(u).strip() for u in urls if u and str(u).strip().lower() not in {"none", "null", ""}]
-        return "answer", " · ".join(urls) or "no URLs", "submitting its answer"
-    return name or "tool", json.dumps(data)[:120], f"using {name}"
+        return verb, " · ".join(urls) or "no URLs", "submitting its answer"
+    return verb, json.dumps(data)[:120], f"using {name}"
 
 
 def verdict(predicted: str | None, expected: str | None, aliases: tuple[str, ...] = ()) -> str:

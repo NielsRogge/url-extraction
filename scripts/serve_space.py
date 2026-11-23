@@ -5,7 +5,7 @@
 # ///
 """Deploy the demo Space (space/ plus the shared harness/ package) serving a merged student on its own GPU.
 
-    uv run scripts/serve_space.py --model nielsr/qwen35-4b-url-agent-grpo-v2-merged
+    uv run scripts/serve_space.py --model nielsr/qwen35-4b-url-agent-v3-grpo-merged
 
 The Space stays private (AGENTS.md); the model repo it serves may be public.
 """
