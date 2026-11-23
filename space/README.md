@@ -12,9 +12,9 @@ short_description: GRPO-tuned 4B OpenCode agent races its frontier teacher
 
 # Same paper, two agents
 
-A Qwen3.5-4B agent, distilled from GLM-5.2's OpenCode trajectories and refined with GRPO through
-OpenEnv's capture proxy and TRL, races its teacher to find a paper's official GitHub repository and
-project page. Both run in the unmodified [OpenCode](https://opencode.ai) harness with the same tools,
+A Qwen3.5-4B agent, distilled from GLM-5.2's OpenCode trajectories (SFT v2) and refined with GRPO (v3)
+through OpenEnv's capture proxy and TRL, races a frontier model, GLM-5.3, to find a paper's official
+GitHub repository and project page. Both run in the unmodified [OpenCode](https://opencode.ai) harness with the same tools,
 prompt and JSON answer schema. Each panel streams that agent's tool calls; the replay button replays
 the last race.
 
@@ -23,7 +23,7 @@ the last race.
   `STUDENT_URL`). The Space itself runs on `cpu-basic`. The first race after the endpoint has scaled
   to zero waits for a cold start of a few minutes. Without `STUDENT_URL`, `launch.py` serves
   `STUDENT_MODEL` with vLLM on the Space's own GPU instead (`scripts/serve_space.py --local-gpu`).
-- **Teacher**: GLM-5.3 (`TEACHER_MODEL`) through Hugging Face Inference Providers.
+- **Teacher**: GLM-5.3 (`TEACHER_MODEL`, default `zai-org/GLM-5.3`) through Hugging Face Inference Providers.
 
 ## Configuration
 
