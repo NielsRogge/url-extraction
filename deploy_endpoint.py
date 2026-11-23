@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # /// script
 # dependencies = [
-#   "httpx>=0.27.0",
+#   "httpx>=0.27.0,<1",
 #   "huggingface-hub>=1.13.0",
 #   "python-dotenv>=1.1.0",
 # ]
@@ -20,7 +20,7 @@ from huggingface_hub import HfApi
 
 API_ROOT = "https://api.endpoints.huggingface.cloud/v2/endpoint"
 DEFAULT_NAME = "qwen35-4b-url-agent-vllm"
-DEFAULT_REPO = "nielsr/qwen35-4b-url-agent-merged"
+DEFAULT_REPO = "nielsr/qwen35-4b-url-agent-v3-grpo-merged"
 
 
 def endpoint_payload(args: argparse.Namespace, revision: str) -> dict[str, Any]:
@@ -65,7 +65,7 @@ def endpoint_payload(args: argparse.Namespace, revision: str) -> dict[str, Any]:
             "env": {},
             "secrets": {},
         },
-        "tags": ["url-extraction", "qwen35", "sft"],
+        "tags": ["url-extraction", "qwen35", "grpo"],
     }
 
 

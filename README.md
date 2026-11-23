@@ -70,8 +70,11 @@ All models, datasets, traces, evaluations and the demo Space are grouped in the
 ## Try it
 
 [`nielsr/url-agent-race`](https://huggingface.co/spaces/nielsr/url-agent-race) runs the GRPO v3
-Qwen3.5-4B ([`nielsr/qwen35-4b-url-agent-v3-grpo-merged`](https://huggingface.co/nielsr/qwen35-4b-url-agent-v3-grpo-merged)) (on the Space's own GPU) against the GLM-5.3 teacher on any arXiv paper, streaming both
-agents' reasoning and tool calls side by side. Source in [`space/`](space/).
+Qwen3.5-4B ([`nielsr/qwen35-4b-url-agent-v3-grpo-merged`](https://huggingface.co/nielsr/qwen35-4b-url-agent-v3-grpo-merged), served by a
+scale-to-zero vLLM Inference Endpoint on one L4, so the Space itself runs on a CPU) against the GLM-5.3 teacher on any arXiv paper, streaming both
+agents' reasoning and tool calls side by side. The first race after the endpoint has scaled to zero waits
+for a cold start. Source in [`space/`](space/); deploy with `uv run deploy_endpoint.py` and
+`uv run scripts/serve_space.py --model <merged repo>` ([docs/deployment.md](docs/deployment.md)).
 
 ## Run the recipe
 

@@ -1,15 +1,19 @@
 # Deployment and production runs (Qwen3.5-4B SFT v1)
 
 How the merged August SFT model was served (Inference Endpoint, local MLX) and evaluated on unseen papers
-with resumable HF Jobs batches. The demo Space now serves the GRPO v2 model on its own GPU instead (see `space/`).
+with resumable HF Jobs batches. The same endpoint now serves the GRPO v3 student
+(`nielsr/qwen35-4b-url-agent-v3-grpo-merged`) to the demo Space; see [Demo Space](#demo-space).
 
 ## Managed Inference Endpoint (recommended production runtime)
 
 `deploy_endpoint.py` creates an authenticated, OpenAI-compatible vLLM
-Inference Endpoint on one L4. It pins the current merged-model revision, caps
+Inference Endpoint on one L4 (`--repo` picks the model; the default is the GRPO v3
+student). It pins the current merged-model revision, caps
 the context at the evaluated 65,536 tokens, and scales to zero after 15 idle
 minutes. The script is idempotent and will report an existing endpoint rather
-than creating a duplicate.
+than creating a duplicate; `--update` moves an existing endpoint to the given
+`--repo` revision, image and serving args. If L4 capacity is unavailable, pass
+`--instance-type nvidia-a10g`.
 
 The `HF_TOKEN` used for deployment must grant read and write access to
 Inference Endpoints in the target namespace.
@@ -50,6 +54,22 @@ proxy to hold the first request while a scaled-to-zero replica starts.
 The deployed Endpoint passed an end-to-end OpenCode smoke test on held-out
 paper `2604.11004`: it executed two `hf papers` Bash calls, returned structured
 output, and matched both expected URLs.
+
+## Demo Space
+
+The private Space `nielsr/url-agent-race` runs on `cpu-basic` and sends student calls to this endpoint:
+`STUDENT_URL` holds the endpoint URL, and the Space's in-process proxy forwards `/student/v1` to it with
+the Space's `HF_TOKEN` and `X-Scale-Up-Timeout: 600`, so the first race after a scale-to-zero waits for
+the cold start instead of failing. That token must be allowed to call Inference Endpoints in the
+`huggingface` org.
+
+```bash
+uv run deploy_endpoint.py   # or --update after a new student checkpoint
+uv run scripts/serve_space.py --model nielsr/qwen35-4b-url-agent-v3-grpo-merged
+```
+
+`scripts/serve_space.py --local-gpu` instead removes `STUDENT_URL` and requests an L4 for the Space,
+which then serves `STUDENT_MODEL` with vLLM itself.
 
 ## Resumable production batches on HF Jobs
 
