@@ -585,6 +585,14 @@ class OpenCodeV2Client(httpx.AsyncClient):
         self.server = server
 
 
+async def check_health(client: Any) -> None:
+    """Raise unless the OpenCode server behind `client` still answers (1.x `/global/health`, 2.x `/api/info`)."""
+    if isinstance(client, OpenCodeV2Client):
+        (await client.get("/api/info")).raise_for_status()
+    else:
+        await raw_json(client, "get", "/global/health")
+
+
 def opencode_client(server: OpenCodeServer | str, *, timeout: Any, max_retries: int = 1) -> Any:
     """The client `run_one` takes: the `opencode-ai` SDK client for 1.x, `OpenCodeV2Client` for 2.x."""
     if isinstance(server, str):

@@ -84,6 +84,8 @@ class FakeOpenCodeV2:
             return httpx.Response(204)
         if path.endswith("/message"):
             return httpx.Response(200, json={"data": self.messages, "cursor": {"previous": None, "next": None}})
+        if path == "/api/info":
+            return httpx.Response(200, json={"version": V2})
         if path.endswith("/interrupt"):
             return httpx.Response(200, json={"interrupted": True})
         return httpx.Response(404, json={"message": path})
@@ -141,6 +143,33 @@ def test_v2_requests() -> None:
     assert trajectory[0] == {"role": "system", "content": system_prompt_v2()}
     assert json.loads(trajectory[-1]["content"])["github_url"] == record["findings"]["github_url"]
     assert [event["tool_name"] for event in record["tool_events"]] == ["shell"]
+
+
+def test_evaluator_runs_a_v2_batch(tmp_path, monkeypatch) -> None:
+    """The evaluator's whole batch loop (incl. its end-of-batch health check) on a 2.x server."""
+    from contextlib import asynccontextmanager
+
+    data, messages, response = EPISODES["correct_and_complete"]
+    fake = FakeOpenCodeV2(to_v2(messages, response))
+
+    @asynccontextmanager
+    async def fake_server(command, base_url=None, strip_credentials=False, version=None):
+        assert strip_credentials and version == V2
+        yield OpenCodeServer("http://opencode", V2, "secret", "/tmp/workspace")
+
+    monkeypatch.setattr(evaluate_vllm, "opencode_server", fake_server)
+    monkeypatch.setattr(evaluate_vllm, "opencode_client", lambda server, **kw: client_for(fake))
+    monkeypatch.setattr(evaluate_vllm, "load_dataset", lambda *a, **k: [dict(data, paper_id=i) for i in range(2)])
+    args = evaluate_vllm.argparse.Namespace(
+        include_partial=False, dataset="d", split="test", paper_ids=None, start=0, limit=10, adapter="",
+        adapter_only=False, base_model="m", opencode_binary="opencode", request_timeout=30, concurrency=1,
+        episode_timeout=30, max_tool_calls=15, max_harness_restarts=3, opencode_version=V2,
+    )  # fmt: skip
+    output = tmp_path / "eval.jsonl"
+    asyncio.run(evaluate_vllm.evaluate(args, output))
+    records = [json.loads(line) for line in output.read_text().splitlines()]
+    assert len(records) == 2 and all(r["opencode_version"] == V2 and r["accepted"] for r in records)
+    assert ("GET", "/api/info", None) in fake.requests
 
 
 def test_permissions_hide_everything_but_the_research_tools() -> None:

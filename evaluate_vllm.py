@@ -49,6 +49,7 @@ from huggingface_hub import HfApi, snapshot_download  # noqa: E402
 from harness.opencode import (  # noqa: E402,F401
     ALLOWED_TOOLS,
     MAX_PORTABLE_TOOL_OUTPUT_CHARS,
+    check_health,
     OPENCODE_TOOLS,
     OPENCODE_VERSION,
     SUPPORTED_OPENCODE_VERSIONS,
@@ -303,7 +304,7 @@ async def run_model(
         await asyncio.gather(*(run_row(i, row) for i, row in enumerate(pending, 1)))
         if not broken.is_set():
             # Explicitly verify that the OpenCode service remained responsive through the final episode.
-            await raw_json(client, "get", "/global/health")
+            await check_health(client)
     return broken.is_set()
 
 
