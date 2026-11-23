@@ -124,7 +124,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--region", default="us-east-1")
     parser.add_argument("--instance-type", default="nvidia-l4")
     parser.add_argument("--instance-size", default="x1")
-    parser.add_argument("--vllm-image", default="vllm/vllm-openai:v0.26.0")
+    parser.add_argument("--vllm-image", default="vllm/vllm-openai:v0.34.0")  # GRPO v3 evals ran on 0.34.0
     parser.add_argument("--max-model-len", type=int, default=65_536)
     parser.add_argument("--max-num-seqs", type=int, default=2)
     parser.add_argument("--scale-to-zero-timeout", type=int, default=15)
