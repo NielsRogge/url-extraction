@@ -28,7 +28,7 @@ from .schema import AgentAttempt, PaperCandidate, ToolEvent, URLFindings
 
 OPENCODE_VERSION = "1.2.4"
 DEFAULT_PROVIDER_ID = "hf-endpoint"
-DEFAULT_MODEL_ID = "nielsr/qwen35-4b-url-agent-merged"
+DEFAULT_MODEL_ID = "nielsr/qwen35-4b-url-agent-v3-grpo-merged"
 ALLOWED_TOOLS = {"bash", "read", "grep", "glob", "webfetch"}
 OPENCODE_TOOLS = {
     "invalid",
@@ -127,7 +127,7 @@ def endpoint_config(base_url: str, model_id: str, provider_id: str = DEFAULT_PRO
                 },
                 "models": {
                     model_id: {
-                        "name": "Qwen3.5 4B URL Agent SFT",
+                        "name": "Qwen3.5 4B URL Agent GRPO v3",
                         "limit": {"context": 65_536, "output": 1_024},
                     }
                 },

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # /// script
 # dependencies = [
-#   "httpx>=0.27.0",
+#   "httpx>=0.27.0,<1",
 #   "huggingface-hub>=1.13.0",
 #   "python-dotenv>=1.1.0",
 # ]
@@ -20,7 +20,7 @@ from huggingface_hub import HfApi
 
 API_ROOT = "https://api.endpoints.huggingface.cloud/v2/endpoint"
 DEFAULT_NAME = "qwen35-4b-url-agent-vllm"
-DEFAULT_REPO = "nielsr/qwen35-4b-url-agent-merged"
+DEFAULT_REPO = "nielsr/qwen35-4b-url-agent-v3-grpo-merged"
 
 
 def endpoint_payload(args: argparse.Namespace, revision: str) -> dict[str, Any]:
@@ -65,7 +65,7 @@ def endpoint_payload(args: argparse.Namespace, revision: str) -> dict[str, Any]:
             "env": {},
             "secrets": {},
         },
-        "tags": ["url-extraction", "qwen35", "sft"],
+        "tags": ["url-extraction", "qwen35", "grpo"],
     }
 
 
@@ -124,7 +124,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--region", default="us-east-1")
     parser.add_argument("--instance-type", default="nvidia-l4")
     parser.add_argument("--instance-size", default="x1")
-    parser.add_argument("--vllm-image", default="vllm/vllm-openai:v0.26.0")
+    parser.add_argument("--vllm-image", default="vllm/vllm-openai:v0.34.0")  # GRPO v3 evals ran on 0.34.0
     parser.add_argument("--max-model-len", type=int, default=65_536)
     parser.add_argument("--max-num-seqs", type=int, default=2)
     parser.add_argument("--scale-to-zero-timeout", type=int, default=15)

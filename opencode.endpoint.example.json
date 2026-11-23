@@ -6,12 +6,12 @@
   "provider": {
     "hf-endpoint": {
       "models": {
-        "nielsr/qwen35-4b-url-agent-merged": {
+        "nielsr/qwen35-4b-url-agent-v3-grpo-merged": {
           "limit": {
             "context": 65536,
             "output": 1024
           },
-          "name": "Qwen3.5 4B URL Agent SFT"
+          "name": "Qwen3.5 4B URL Agent GRPO v3"
         }
       },
       "name": "Hugging Face Inference Endpoint",

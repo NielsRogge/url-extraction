@@ -60,7 +60,8 @@ HF_TOKEN = _read_token()
 for _key in [k for k in os.environ if "TOKEN" in k.upper() or "SECRET" in k.upper()]:
     os.environ.pop(_key, None)
 BILL_TO = os.environ.get("HF_BILL_TO", "").strip() or None
-# The student runs on this Space's own GPU (vLLM started by launch.py).
+# The student runs on a managed Inference Endpoint (STUDENT_URL), or else on this Space's own GPU
+# (vLLM started by launch.py at 127.0.0.1:8000).
 STUDENT_URL = os.environ.get("STUDENT_URL", "http://127.0.0.1:8000").rstrip("/")
 STUDENT_LABEL = os.environ.get("STUDENT_LABEL", "Qwen3.5-4B · SFT + GRPO v3")
 STUDENT_GPU_PER_HOUR = float(os.environ.get("STUDENT_GPU_PER_HOUR", "0.80"))
