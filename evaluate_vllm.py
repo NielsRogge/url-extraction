@@ -353,6 +353,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--base-model", default=BASE_MODEL)
     parser.add_argument("--adapter", default=ADAPTER_ID, help="LoRA adapter repo or dir; '' evaluates the base model only")
+    parser.add_argument("--adapter-revision", help="Adapter repo revision, e.g. a training checkpoint's commit")
     parser.add_argument("--adapter-only", action="store_true", help="Skip the base model (already evaluated)")
     parser.add_argument("--adapter-converter", default="", help="module:function preparing the adapter for vLLM")
     parser.add_argument("--output", type=Path, default=Path("/artifacts/qwen35-4b-url-agent-eval/validation.jsonl"))
@@ -388,7 +389,7 @@ def main(args: argparse.Namespace) -> None:
     adapter_path = ""
     if args.adapter:
         adapter_snapshot = (
-            args.adapter if Path(args.adapter).is_dir() else snapshot_download(args.adapter, token=os.environ["HF_TOKEN"])
+            args.adapter if Path(args.adapter).is_dir() else snapshot_download(args.adapter, revision=args.adapter_revision, token=os.environ["HF_TOKEN"])
         )
         adapter_path = prepare_text_adapter(adapter_snapshot, workdir / "text-adapter", args.adapter_converter)
     server = start_vllm(args, adapter_path)

@@ -169,3 +169,13 @@ def test_probe_args_passthrough():
     _, built = jobs(["--teacher", "kimi-k3.1-pro", "--student", "qwen3.5-9b", "--stages", "probe", "--probe-args", "--sample 0"])
     command = built["probe"][0].command
     assert command.index("--sample 300") < command.index("--sample 0")  # the last flag wins: probe every candidate
+
+
+def test_grpo_checkpoints_are_evaluated_at_their_revision():
+    run, built = jobs(["--teacher", "kimi-k3.1-pro", "--student", "qwen3.5-9b", "--stages", "eval", "--eval-variants", "grpo",
+                       "--splits", "test", "--grpo-checkpoint", "step50=8c65", "--grpo-checkpoint", "step100=c3e3"])  # fmt: skip
+    by_name = {job.name.split("-eval-")[1]: job.command for job in built["eval"]}
+    assert set(by_name) == {"grpo-step50-test", "grpo-step100-test"}
+    step50 = by_name["grpo-step50-test"]
+    assert "--adapter-revision 8c65" in step50 and "--tag sft-grpo-step50/" in step50
+    assert f"--base-model {run.sft_merged}" in step50 and f"--adapter {run.grpo_adapter}" in step50
