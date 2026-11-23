@@ -58,9 +58,8 @@ Takeaways:
   with no tool call. In 1.2.4 this could not happen: the `StructuredOutput` tool forced
   `tool_choice: required`, so every turn was a tool call and the episode only ended with the answer.
   OpenCode 2 sends no `tool_choice` and ends the loop on the first text-only turn. GRPO's reward removes
-  the behaviour (6 such episodes on test). Likely fixes, not tried here: a harness retry that asks for the
-  JSON answer once when the final message is not valid JSON (1.x already does this when a provider rejects
-  structured output), or SFT on traces without the spill-file habit (below).
+  the behaviour (6 such episodes on test). A one-time JSON answer retry in the harness recovers part of the
+  gap (next section).
 - **GLM-5.3 in 2.3.2 is weaker on test_hard than GLM-5.2 in 1.2.4** (69.9% vs 81.8%): it hits the
   15-call limit (50 of 175 papers in the first run) and opens the project page after it already found
   GitHub (45). The same habit was the top trace rejection reason (570 of 2,772 attempts).
@@ -71,6 +70,42 @@ Takeaways:
   but the SFT student learned to hunt for output files (7-9 tool calls per episode). All reported
   evaluations are from the rerun with isolated episodes; the first evaluation (shared server) was
   discarded.
+
+### JSON answer retry (`--answer-retry`)
+
+`evaluate_vllm.py --answer-retry` (pipeline: `--eval-args=--answer-retry`) sends one more prompt when a
+2.x session goes idle without a valid JSON answer ("You stopped without the final answer. If the research
+is not finished, continue it with the tools. Then end with only one JSON object ..."), within the same
+180 s and 15-call budget. It is off by default; the GRPO and teacher numbers above ran without it. The SFT
+evaluation (SFT adapter and base on the same papers) was rerun with it, into
+[`qwen35-4b-url-agent-oc2-eval-retry`](https://huggingface.co/datasets/nielsr/qwen35-4b-url-agent-oc2-eval-retry):
+
+| Model | Test | Validation | Test_hard |
+|---|---:|---:|---:|
+| SFT (LoRA), no retry | 52.2% | 57.6% | 37.5% |
+| **SFT (LoRA) + retry** | **68.0%** | **65.4%** | **50.2%** |
+| Base, no retry | 59.7% | 59.5% | 46.8% |
+| Base + retry | 60.1% | 63.8% | 61.7% |
+| GRPO, no retry (for reference) | 87.0% | 87.9% | 71.7% |
+
+The SFT student used the retry in 64/220, 69/213 and 47/175 episodes (test, validation, test_hard); 31,
+30 and 17 of those ended fully correct. "No valid structured output" fell from 65 to 8 episodes on
+validation. Base rarely needs it (9, 12 and 7 episodes), so its +15 points on test_hard are mostly
+run-to-run noise: single runs on 175-220 papers sampled at temperature 0.8 move by 10 points or more.
+With the retry the SFT student beats base on test and validation, but it stays well below GRPO and
+below the 1.2.4 SFT v2 (90.1%/91.8%/73.2%). Its remaining failures are the 15-call limit and timeouts
+(7-9 tool calls per episode), the spill-file habit from the traces (see the caveat above).
+
+Full table:
+
+| Model | Split | Field acc. (all) | Exact (all) | Field acc. (fully scoreable) | Exact (fully scoreable) | Tool calls |
+|---|---|---:|---:|---:|---:|---:|
+| SFT (LoRA) + retry | test | 68.0% (253) | 145/220 | 80.3% (66) | 26/33 | 7.7 |
+| Base + retry | test | 60.1% (253) | 130/220 | 62.1% (66) | 19/33 | 9.6 |
+| SFT (LoRA) + retry | test_hard | 50.2% (269) | 78/175 | 54.3% (188) | 45/94 | 9.5 |
+| Base + retry | test_hard | 61.7% (269) | 96/175 | 68.6% (188) | 59/94 | 9.9 |
+| SFT (LoRA) + retry | validation | 65.4% (257) | 137/213 | 65.9% (88) | 27/44 | 7.4 |
+| Base + retry | validation | 63.8% (257) | 131/213 | 65.9% (88) | 25/44 | 9.3 |
 
 ### Run
 

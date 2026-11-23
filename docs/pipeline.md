@@ -120,6 +120,9 @@ uv run pipeline.py --teacher kimi-k3.1-pro --student qwen3.5-9b --dataset nielsr
 - `--opencode-version` (`1.2.4`, the default, or `2.3.2`) pins the OpenCode release of every stage (traces,
   SFT tool schemas, probe, GRPO rollouts, evaluation); a profile may pin it instead. It is recorded in the run
   manifest, every episode record and the dataset cards. Scripts never use another `opencode` on PATH.
+- `--eval-args` passes extra `evaluate_vllm.py` flags to the student evaluations. Write it with `=` when
+  the value starts with `--`, e.g. `--eval-args=--answer-retry` (OpenCode 2.x: ask once for the JSON
+  answer when an episode ends without one).
 - `<run>` defaults to `<student>-url-agent-<teacher>` (plus `-oc2` in OpenCode 2.x) under `--namespace` (nielsr). Override single repos
   with `--traces-repo`, `--sft-adapter`, `--sft-merged`, `--grpo-adapter`, `--grpo-merged`, `--eval-repo`.
 - Code is staged to the private `<run>-code` model repo under `code/<rev>/`: the stage scripts, the whole
