@@ -42,7 +42,8 @@ git push origin --delete claude/new-feature
 
 - Every artifact this project publishes on the Hugging Face Hub (models, adapters, datasets, trace and evaluation datasets, and Spaces) must be added to the project collection: https://huggingface.co/collections/nielsr/paper-url-agent-frontier-to-small-distillation-6b01c8378db0ff55d524014e
 - Add it when the repo is created, with a one-line note saying what it is (teacher, student, stage).
-- Visibility: models and datasets are public. Spaces, code snapshots (repos or buckets holding job code) and this GitHub repository stay private.
+- Visibility: models, datasets and this GitHub repository are public. Spaces and code snapshots (repos or buckets holding job code) stay private.
+- This repository is public: never commit credentials, `.env` files, agent settings (`.claude/settings.local.json`), raw episode or trace data, or the contents of private or internal datasets. Data lives on the Hub; refer to private resources by name only. Scan the diff for credential patterns before pushing; a credential that reaches git history must be revoked, because the history keeps it.
 - Before making a dataset public, scan it for credentials (`hf_`, `sk-`, `ghp_` tokens); `trace_export.py` redacts HF tokens in sessions.
   - Create episode datasets (traces, evaluations) private and make them public only after the scan passes; `pipeline.py --stages publish` does the scan and refuses on a hit. Never pass `--public` to a job that writes episodes.
   - Agents run shell commands and may print their environment (`env`, `os.environ`). Do not give an agent's OpenCode server tokens it does not need (`opencode_server(..., strip_credentials=True)`), and write records through `harness.opencode.record_line`, which redacts tokens.
