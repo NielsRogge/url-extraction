@@ -133,6 +133,8 @@ uv run pipeline.py --teacher kimi-k3.1-pro --student qwen3.5-9b --dataset nielsr
   `--learning-rate 2e-5 --max-steps 150 --exclude-tiers 7 --tier-weights 0:2,2:2,3:2,4:2,5:2,6:2`.
 - Starting from an existing SFT adapter: pass `--sft-adapter <repo>` and run from `merge` on.
 - `--grpo-merge-only` merges an already pushed GRPO adapter (recovery after a failed merge or eval).
+- `--grpo-checkpoint LABEL=REVISION` (repeatable) evaluates an earlier GRPO adapter revision in the eval stage, e.g.
+  `--stages eval --eval-variants grpo --grpo-checkpoint step50=<commit>`; results go under `sft-grpo-<label>/`.
 
 ### Credentials
 

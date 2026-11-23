@@ -404,8 +404,15 @@ def eval_jobs(run: Run, rev: str, args: argparse.Namespace) -> list[Job]:
         "grpo": (q(run.sft_merged), q(run.grpo_adapter)),
     }
     tags = {"base": "base/", "sft": "sft/", "grpo": "sft-grpo/", "teacher": "teacher/"}
+    revisions = {}  # variant -> adapter revision
+    for label, revision in grpo_checkpoints(args):  # earlier GRPO checkpoints, each under its own tag
+        variant = f"grpo-{label}"
+        variants[variant], tags[variant], revisions[variant] = variants["grpo"], f"sft-grpo-{label}/", revision
+    names = [v for v in args.eval_variants.split(",") if v]
+    if revisions:
+        names = [v for v in names if v != "grpo"] + list(revisions)
     jobs = []
-    for variant in [v for v in args.eval_variants.split(",") if v]:
+    for variant in names:
         # One job per (variant, split): splits run in parallel and a failure reruns only its split.
         for split in splits:
             if variant == "teacher":
@@ -416,6 +423,8 @@ def eval_jobs(run: Run, rev: str, args: argparse.Namespace) -> list[Job]:
                 *common, "--split", split, "--base-model", base, "--adapter", adapter, "--tag", tags[variant],
                 "--output", f"/eval/{variant}/{split}.jsonl", *serve_flags(student),
             ]  # fmt: skip
+            if variant in revisions:
+                evaluate += ["--adapter-revision", q(revisions[variant])]
             command = "\n".join(
                 [prelude(run, rev, image_vllm=student.serve.vllm == "image"), evaluator(student, evaluate), "echo EVAL_DONE"]
             )
@@ -424,6 +433,17 @@ def eval_jobs(run: Run, rev: str, args: argparse.Namespace) -> list[Job]:
                     student.serve.flavor, student.serve.timeout, command, {})  # fmt: skip
             )
     return jobs
+
+
+def grpo_checkpoints(args: argparse.Namespace) -> list[tuple[str, str]]:
+    """`--grpo-checkpoint step50=<commit>` pairs; each replaces the final GRPO adapter in the eval stage."""
+    pairs = []
+    for spec in args.grpo_checkpoint:
+        label, _, revision = spec.partition("=")
+        if not label or not revision:
+            raise ValueError(f"--grpo-checkpoint expects LABEL=REVISION, got {spec!r}")
+        pairs.append((label, revision))
+    return pairs
 
 
 def teacher_eval_job(run: Run, rev: str, split: str, args: argparse.Namespace) -> Job:
@@ -623,6 +643,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--probe-shards", type=int, default=0, help="Parallel probe jobs (default: student profile)")
     parser.add_argument("--probe-args", default="", help="Extra difficulty_probe.py arguments, e.g. '--sample 0' (all)")
     parser.add_argument("--probe-exclude-tiers", default="", help="Probe only train papers outside these tiers, e.g. 7")
+    parser.add_argument(
+        "--grpo-checkpoint",
+        action="append",
+        default=[],
+        help="Eval stage: evaluate the GRPO adapter at this repo revision instead of the final one, as LABEL=REVISION "
+        "(e.g. step50=8c653501; tagged sft-grpo-step50/); repeatable",
+    )
     parser.add_argument("--grpo-merge-only", action="store_true", help="GRPO stage: merge the pushed adapter, no training")
     parser.add_argument("--rev", help="Reuse already staged code (code/<rev>/ in the code repo)")
     parser.add_argument("--commit", help="Code commit to record (default: git rev-parse HEAD)")

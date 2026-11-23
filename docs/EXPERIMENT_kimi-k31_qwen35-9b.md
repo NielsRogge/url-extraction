@@ -113,6 +113,23 @@ SFT mainly cuts its tool calls. Likely causes to test: the pool is 55% tier 1, w
 solves; lr 2e-5 may be too high for the 9B; the step-50 and step-100 checkpoints in the adapter repo's history
 would show whether the drop grows with training. Cost about $175.
 
+**Checkpoints.** The step-50 and step-100 adapters (repo revisions `8c653501e59e`, `c3e3c12d00a5`) were evaluated
+with the same settings (`--grpo-checkpoint step50=8c653501e59e --grpo-checkpoint step100=c3e3c12d00a5`). Each
+job also re-ran the merged SFT model on the same papers, so every row has its own paired control. Field
+accuracy over all papers, adapter vs its control (exact answers on test_hard in brackets):
+
+| Checkpoint | Test | Validation | test_hard | Tool calls (test / val / hard) |
+|---|---|---|---|---|
+| Step 50 | 88.1% vs 89.7% | 89.1% vs 89.9% | 69.5% vs 77.3% (106 vs 120) | 4.5 / 4.8 / 5.8 |
+| Step 100 | 88.5% vs 88.5% | 91.1% vs 89.1% | 73.2% vs 73.2% (111 vs 110) | 4.0 / 3.7 / 5.4 |
+| Step 150 (final) | 85.8% vs 87.0% | 90.3% vs 91.4% | 66.5% vs 73.2% (98 vs 114) | 3.9 / 3.9 / 5.6 |
+
+The drop does not grow steadily with training: step 100 matches its control and steps 50 and 150 are below
+theirs. The three runs of the same merged SFT model alone span 73.2-77.3% on test_hard (110-120 exact), so
+single-sample differences of about 4 points are noise. Against the mean of the three controls (74.6%, 114.7
+exact), every checkpoint is below on test_hard (-5.1, -1.4, -8.1 points); no checkpoint is a clear improvement
+over SFT. Records: [`nielsr/qwen35-9b-url-agent-v3-ckpt-eval`](https://huggingface.co/datasets/nielsr/qwen35-9b-url-agent-v3-ckpt-eval).
+
 Artifacts: [`nielsr/qwen35-9b-url-agent-v3-sft-merged`](https://huggingface.co/nielsr/qwen35-9b-url-agent-v3-sft-merged),
 [`-v3-grpo-lora`](https://huggingface.co/nielsr/qwen35-9b-url-agent-v3-grpo-lora),
 [`-v3-grpo-merged`](https://huggingface.co/nielsr/qwen35-9b-url-agent-v3-grpo-merged),
