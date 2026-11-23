@@ -233,6 +233,53 @@ def test_opencode_server_records_how_to_start_episode_servers(monkeypatch) -> No
     assert asyncio.run(go("1.2.4")).executable is None
 
 
+@pytest.mark.parametrize("retry", [False, True])
+def test_answer_retry(retry: bool) -> None:
+    """2.x ends an episode on a text-only turn; with answer_retry the harness asks once for the JSON answer."""
+    data, messages, response = EPISODES["correct_and_complete"]
+    full = to_v2(messages, response)
+    answer = full[-2]  # the assistant message with the JSON answer (before idle)
+    prose = {**answer, "id": "msg_prose", "content": [{"type": "text", "text": "Let me start with hf papers info."}]}
+    first = [*full[:-2], prose, {"id": "msg_idle1", "type": "idle", "outcome": "succeeded"}]
+    nudge = {"id": "msg_nudge", "type": "user", "text": opencode_v2.ANSWER_RETRY}
+    second = [*first, nudge, {**answer, "id": "msg_answer"}, {"id": "msg_idle2", "type": "idle", "outcome": "succeeded"}]
+    fake = FakeOpenCodeV2(first)
+    prompts: list[str] = []
+    original = fake.__call__
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/prompt"):
+            prompts.append(json.loads(request.content)["text"])
+            if len(prompts) == 2:
+                fake.messages = second
+        return original(request)
+
+    async def go() -> dict[str, Any]:
+        server = OpenCodeServer("http://opencode", V2, "secret", "/tmp/workspace")
+        async with OpenCodeV2Client(server, timeout=30, transport=httpx.MockTransport(handler)) as client:
+            return await evaluate_vllm.run_one(client, data, ("provider", "model"), episode_timeout=30,
+                                               max_tool_calls=MAX_TOOL_CALLS, answer_retry=retry)  # fmt: skip
+
+    record = asyncio.run(go())
+    if retry:
+        assert prompts[1] == opencode_v2.ANSWER_RETRY and len(prompts) == 2
+        assert record["accepted"] and record["answer_retry"] is True
+    else:
+        assert len(prompts) == 1 and record["findings"] is None and "answer_retry" not in record
+
+
+def test_answer_retry_is_v2_only() -> None:
+    with pytest.raises(ValueError):
+        asyncio.run(opencode.run_one(object(), {}, ("p", "m"), episode_timeout=1, max_tool_calls=1, answer_retry=True))
+
+
+def test_pipeline_passes_eval_args() -> None:
+    args = pipeline.parse_args(["--teacher", "glm-5.3", "--student", "qwen3.5-4b", "--opencode-version", V2,
+                                "--eval-variants", "sft", "--splits", "test", "--eval-args=--answer-retry"])  # fmt: skip
+    jobs = pipeline.eval_jobs(pipeline.make_run(args), "rev", args)
+    assert len(jobs) == 1 and "--answer-retry" in jobs[0].command
+
+
 def test_permissions_hide_everything_but_the_research_tools() -> None:
     def hidden(action: str, rules: list[dict[str, str]]) -> bool:  # OpenCode's `whollyDisabled`
         import fnmatch

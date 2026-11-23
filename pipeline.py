@@ -447,6 +447,7 @@ def eval_jobs(run: Run, rev: str, args: argparse.Namespace) -> list[Job]:
             evaluate = [
                 *common, "--split", split, "--base-model", base, "--adapter", adapter, "--tag", tags[variant],
                 "--output", f"/eval/{variant}/{split}.jsonl", *serve_flags(student),
+                *(q(flag) for flag in shlex.split(args.eval_args)),
             ]  # fmt: skip
             command = "\n".join(
                 [prelude(run, rev, image_vllm=student.serve.vllm == "image"), evaluator(student, evaluate), "echo EVAL_DONE"]
@@ -657,6 +658,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     for name in ("traces-repo", "sft-adapter", "sft-merged", "grpo-adapter", "grpo-merged", "eval-repo", "code-repo"):
         parser.add_argument(f"--{name}", help=f"Override the {name.replace('-', ' ')} repo id")
     parser.add_argument("--grpo-args", default="", help="Extra train_grpo_harness.py arguments (last flag wins)")
+    parser.add_argument("--eval-args", default="", help="Extra evaluate_vllm.py arguments for student evaluations, e.g. '--answer-retry'")
     parser.add_argument("--probe-shards", type=int, default=0, help="Parallel probe jobs (default: student profile)")
     parser.add_argument("--probe-args", default="", help="Extra difficulty_probe.py arguments, e.g. '--sample 0' (all)")
     parser.add_argument("--probe-exclude-tiers", default="", help="Probe only train papers outside these tiers, e.g. 7")

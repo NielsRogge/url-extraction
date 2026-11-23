@@ -660,14 +660,20 @@ async def run_one(
     episode_timeout: float,
     max_tool_calls: int,
     title: str = "URL research",
+    answer_retry: bool = False,
 ) -> dict[str, Any]:
-    """Run one paper in OpenCode and return its scored episode record."""
+    """Run one paper in OpenCode and return its scored episode record.
+
+    `answer_retry` (2.x only): ask once for the JSON answer when the session ends without one."""
     if isinstance(client, OpenCodeV2Client):
         from harness import opencode_v2
 
         return await opencode_v2.run_one(
-            client, row, model, episode_timeout=episode_timeout, max_tool_calls=max_tool_calls, title=title
-        )
+            client, row, model, episode_timeout=episode_timeout, max_tool_calls=max_tool_calls, title=title,
+            answer_retry=answer_retry,
+        )  # fmt: skip
+    if answer_retry:
+        raise ValueError("answer_retry is for OpenCode 2.x (1.x forces a tool call on every turn)")
     candidate = candidate_from_row(row)
     started = time.monotonic()
     session = await raw_json(

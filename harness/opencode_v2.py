@@ -40,6 +40,13 @@ PERMISSIONS = [
     {"action": "external_directory", "resource": "*", "effect": "deny"},
 ]
 PAGE_LIMIT = 200
+# Sent once (with `answer_retry`) when the session went idle without a valid JSON answer. OpenCode 1.x could not
+# end an episode on a text-only turn (its StructuredOutput tool forced `tool_choice: required`); 2.x ends the loop on
+# the first turn without a tool call, often a one-line plan from a small model.
+ANSWER_RETRY = (
+    "You stopped without the final answer. If the research is not finished, continue it with the tools. "
+    "Then end with only one JSON object with reasoning, github_url, and project_page_url (no other text)."
+)
 
 
 def server_config(content: str | dict[str, Any] | None) -> dict[str, Any]:
@@ -173,6 +180,14 @@ def tool_call_count(messages: list[dict[str, Any]]) -> int:
 # --------------------------------------------------------------------------------------------------
 
 
+def has_answer(messages: list[dict[str, Any]]) -> bool:
+    """Whether the session's final assistant text parses as a valid answer."""
+    from harness.opencode import parse_findings
+
+    findings, _ = parse_findings({}, normalize_messages(messages))
+    return findings is not None
+
+
 async def api(client: Any, method: str, path: str, body: dict[str, Any] | None = None, **kwargs: Any) -> Any:
     response = await client.request(method.upper(), path, json=body, **kwargs)
     response.raise_for_status()
@@ -235,8 +250,12 @@ async def run_session(
     title: str,
     episode_timeout: float,
     max_tool_calls: int | None,
+    answer_retry: bool = False,
 ) -> tuple[str, list[dict[str, Any]], str | None, bool]:
     """Create a session, send `prompt`, wait (with the tool-call watchdog and the episode timeout).
+
+    With `answer_retry`, a session that goes idle without a valid JSON answer gets `ANSWER_RETRY` once, within the
+    same episode timeout and tool-call budget.
 
     Returns (session id, raw OpenCode 2 messages, failure or None, timed out)."""
     session_id = await create_session(client, model, title)
@@ -259,6 +278,9 @@ async def run_session(
         async with asyncio.timeout(episode_timeout):
             await api(client, "post", f"/api/session/{session_id}/prompt", {"text": prompt})
             await wait_idle(client, session_id)
+            if answer_retry and watchdog_reason is None and not has_answer(await list_messages(client, session_id)):
+                await api(client, "post", f"/api/session/{session_id}/prompt", {"text": ANSWER_RETRY})
+                await wait_idle(client, session_id)
     except TimeoutError:
         timed_out = True
         failure = f"episode timed out after {episode_timeout:g} seconds"
@@ -285,6 +307,7 @@ async def run_one(
     episode_timeout: float,
     max_tool_calls: int,
     title: str = "URL research",
+    answer_retry: bool = False,
 ) -> dict[str, Any]:
     """Run one paper in OpenCode 2 and return its scored episode record (same format as 1.x)."""
     from harness.opencode import build_record
@@ -294,7 +317,8 @@ async def run_one(
     candidate = candidate_from_row(row)
     started = time.monotonic()
     session_args = dict(
-        title=f"{title} {candidate.arxiv_id}", episode_timeout=episode_timeout, max_tool_calls=max_tool_calls
+        title=f"{title} {candidate.arxiv_id}", episode_timeout=episode_timeout, max_tool_calls=max_tool_calls,
+        answer_retry=answer_retry,
     )
     server = getattr(client, "server", None)
     if server is not None and server.executable:
@@ -308,7 +332,7 @@ async def run_one(
             )
     else:
         session_id, messages, failure, _ = await run_session(client, model, user_prompt(candidate), **session_args)
-    return build_record(
+    record = build_record(
         row,
         f"{model[0]}/{model[1]}",
         session_id=session_id,
@@ -320,3 +344,9 @@ async def run_one(
         opencode_version=client.server.version,
         system_prompt=system_prompt_v2(),
     )
+    if answer_retry:
+        record["answer_retry"] = any(
+            message.get("type") == "user" and (message.get("text") or (message.get("payload") or {}).get("text")) == ANSWER_RETRY
+            for message in messages
+        )
+    return record

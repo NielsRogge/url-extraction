@@ -90,10 +90,11 @@ BASE_MODEL = "Qwen/Qwen3.5-4B"
 
 
 async def run_one(client: Any, row: dict[str, Any], model: tuple[str, str], *, episode_timeout: float,
-                  max_tool_calls: int) -> dict[str, Any]:  # fmt: skip
+                  max_tool_calls: int, answer_retry: bool = False) -> dict[str, Any]:  # fmt: skip
     return await _run_one(
-        client, row, model, episode_timeout=episode_timeout, max_tool_calls=max_tool_calls, title="URL evaluation"
-    )
+        client, row, model, episode_timeout=episode_timeout, max_tool_calls=max_tool_calls, title="URL evaluation",
+        answer_retry=answer_retry,
+    )  # fmt: skip
 
 
 def wait_for_server(process: subprocess.Popen, timeout: float = 900) -> None:
@@ -284,6 +285,7 @@ async def run_model(
                     ("local-vllm", model_id),
                     episode_timeout=args.episode_timeout,
                     max_tool_calls=args.max_tool_calls,
+                    answer_retry=getattr(args, "answer_retry", False),
                 )
                 if failure := harness_failure(record):
                     print(f"  harness failure, not recorded: {failure}", flush=True)
@@ -363,6 +365,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--episode-timeout", type=float, default=240)
     parser.add_argument("--request-timeout", type=float, default=600)
     parser.add_argument("--max-tool-calls", type=int, default=20)
+    parser.add_argument(
+        "--answer-retry",
+        action="store_true",
+        help="OpenCode 2.x: when an episode ends without a valid JSON answer, ask for it once (same time/tool budget)",
+    )
     parser.add_argument("--max-model-len", type=int, default=65536)
     parser.add_argument("--max-output-tokens", type=int, default=1024)
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.85)
