@@ -224,8 +224,12 @@ async def async_main(args: argparse.Namespace) -> None:
                     )
                     record["attempt"] = attempt
                     if args.evaluation_label:  # e.g. "teacher": a teacher baseline in the evaluator's summary
+                        # Same columns as evaluate_vllm.py records, so one dataset config can hold both.
+                        for key in ("attempt", "all_requested_scoreable"):
+                            record.pop(key, None)
                         record["evaluation_model"] = args.evaluation_label
                         record["difficulty_tier"] = row.get("difficulty_tier")
+                        record["served_model"] = args.model
                     with args.output.open("a", encoding="utf-8") as handle:
                         handle.write(record_line(record))
                         handle.flush()

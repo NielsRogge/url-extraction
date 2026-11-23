@@ -252,6 +252,24 @@ def record_to_pi_session(record: dict[str, Any]) -> list[dict[str, Any]]:
     return lines
 
 
+# Characters Python's str.splitlines() (used by the Hub's dataset viewer) treats as line breaks besides \n.
+# json.dumps(ensure_ascii=False) writes them raw, which splits one JSON line in two; escape them instead.
+_LINE_BREAKS = {"\u2028": "\\u2028", "\u2029": "\\u2029", "\x85": "\\u0085", "\x0b": "\\u000b", "\x0c": "\\u000c",
+                "\x1c": "\\u001c", "\x1d": "\\u001d", "\x1e": "\\u001e", "\r": "\\r"}  # fmt: skip
+
+
+def jsonl_line(value: Any) -> str:
+    """One JSON line that every JSONL reader splits correctly (surrogates and Unicode line breaks escaped)."""
+    try:
+        line = json.dumps(value, ensure_ascii=False)
+        line.encode("utf-8")
+    except UnicodeEncodeError:  # lone surrogates from tool output
+        return json.dumps(value)
+    for char, escaped in _LINE_BREAKS.items():
+        line = line.replace(char, escaped)
+    return line
+
+
 def write_sessions(records: Iterable[dict[str, Any]], out_dir: Path) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     count = 0
@@ -261,10 +279,7 @@ def write_sessions(records: Iterable[dict[str, Any]], out_dir: Path) -> int:
         path = out_dir / session_filename(record)
         with path.open("w", encoding="utf-8") as handle:
             for line in record_to_pi_session(record):
-                try:
-                    handle.write(json.dumps(line, ensure_ascii=False) + "\n")
-                except UnicodeEncodeError:
-                    handle.write(json.dumps(line) + "\n")
+                handle.write(jsonl_line(line) + "\n")
         count += 1
     return count
 
