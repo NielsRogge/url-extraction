@@ -446,13 +446,23 @@ class OpenCodeServer:
 
 
 def server_env(
-    version: str, base: dict[str, str] | None = None, *, workspace: str | Path | None = None, strip_credentials: bool = False
+    version: str,
+    base: dict[str, str] | None = None,
+    *,
+    workspace: str | Path | None = None,
+    strip_credentials: bool = False,
+    isolate: bool = False,
 ) -> dict[str, str]:
     """The environment of an `opencode serve` process (and so of every shell its agent runs).
 
     v2: no server password (it is generated and read from stdout, so the agent cannot read it from `env`),
     no ~/.claude prompts or skills, the bundled model catalog instead of a live models.dev fetch, the config agent
     of `harness.opencode_v2` merged into OPENCODE_CONFIG_CONTENT, and per-workspace data/config/state directories.
+
+    The XDG directories default to the workspace. With `isolate`, they always point into the workspace, even when
+    the base environment (e.g. a job image) already sets them: OpenCode 2 spills shell output into its data
+    directory, so servers sharing one would read each other's files. Without it, directories the caller chose are
+    kept (GRPO rollouts pass their own per-rollout ones).
     """
     env = dict(os.environ if base is None else base)
     if strip_credentials:
@@ -467,7 +477,11 @@ def server_env(
         env["OPENCODE_CONFIG_CONTENT"] = json.dumps(opencode_v2.server_config(env.get("OPENCODE_CONFIG_CONTENT")))
         if workspace is not None:
             for key, name in (("XDG_DATA_HOME", "data"), ("XDG_CONFIG_HOME", "config"), ("XDG_STATE_HOME", "state")):
-                env.setdefault(key, str(Path(workspace) / f".opencode-{name}"))
+                path = str(Path(workspace) / f".opencode-{name}")
+                if isolate:
+                    env[key] = path
+                else:
+                    env.setdefault(key, path)
     return env
 
 
@@ -570,7 +584,7 @@ async def opencode_server(
     executable = shutil.which(command) or command
     version = require_opencode_version(executable, version) if version else check_supported(binary_version(executable) or "")
     workspace = tempfile.TemporaryDirectory(prefix="url-agent-")
-    env = server_env(version, workspace=workspace.name, strip_credentials=strip_credentials)
+    env = server_env(version, workspace=workspace.name, strip_credentials=strip_credentials, isolate=True)
     process, server = await asyncio.to_thread(start_opencode, executable, version, workspace.name, env, startup_timeout=30)
     if opencode_api(version) == 2:
         server = replace(server, executable=executable, strip_credentials=strip_credentials)
@@ -594,7 +608,9 @@ async def isolated_episode_server(server: OpenCodeServer, *, startup_timeout: fl
         raise ValueError("isolated_episode_server needs a server started by opencode_server")
     workspace = tempfile.TemporaryDirectory(prefix="url-episode-")
     try:
-        env = server_env(server.version, workspace=workspace.name, strip_credentials=server.strip_credentials)
+        env = server_env(
+            server.version, workspace=workspace.name, strip_credentials=server.strip_credentials, isolate=True
+        )
         process, episode = await asyncio.to_thread(
             start_opencode, server.executable, server.version, workspace.name, env,
             startup_timeout=startup_timeout, new_session=True,
