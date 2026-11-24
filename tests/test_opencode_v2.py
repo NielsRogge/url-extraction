@@ -330,6 +330,49 @@ def test_server_config_adds_the_agent_and_keeps_providers() -> None:
     assert "JSON Schema" in agent["system"] and "Shell, Read" in agent["system"]
 
 
+def test_isolated_servers_override_inherited_xdg_dirs(monkeypatch, tmp_path) -> None:
+    """A job image that sets XDG_* must not make episode servers share one data directory (spilled shell output)."""
+    inherited = {"XDG_DATA_HOME": "/shared/data", "XDG_CONFIG_HOME": "/shared/config", "XDG_STATE_HOME": "/shared/state"}
+    base = {"PATH": "/bin", **inherited}
+    isolated = opencode.server_env(V2, base, workspace="/w", isolate=True)
+    assert [isolated[k] for k in inherited] == ["/w/.opencode-data", "/w/.opencode-config", "/w/.opencode-state"]
+    # Without isolate (GRPO passes its own per-rollout directories), the caller's directories are kept.
+    assert {k: opencode.server_env(V2, base, workspace="/w")[k] for k in inherited} == inherited
+
+    # opencode_server and isolated_episode_server both isolate, even when os.environ sets XDG_DATA_HOME.
+    for key, value in inherited.items():
+        monkeypatch.setenv(key, value)
+    envs: list[tuple[str, dict[str, str]]] = []
+
+    def fake_start(executable, version, workspace, env, **kw):
+        envs.append((workspace, env))
+        return type("P", (), {"pid": 0})(), OpenCodeServer("http://x", version, "pw", workspace)
+
+    monkeypatch.setattr(opencode, "require_opencode_version", lambda executable, version: version)
+    monkeypatch.setattr(opencode, "start_opencode", fake_start)
+    monkeypatch.setattr(opencode, "stop_process", lambda process, **kw: None)
+
+    async def go() -> None:
+        async with opencode.opencode_server("/bin/opencode", strip_credentials=True, version=V2) as shared:
+            async with opencode.isolated_episode_server(shared), opencode.isolated_episode_server(shared):
+                pass
+
+    asyncio.run(go())
+    assert len(envs) == 3
+    data_dirs = {env["XDG_DATA_HOME"] for _, env in envs}
+    assert len(data_dirs) == 3 and "/shared/data" not in data_dirs
+    for workspace, env in envs:
+        assert all(env[key].startswith(workspace) for key in inherited)
+
+
+def test_grpo_rollouts_keep_their_own_xdg_dirs() -> None:
+    import inspect
+
+    source = inspect.getsource(train_grpo_harness)
+    assert '"XDG_DATA_HOME": str(self.workdir / "data")' in source
+    assert "isolate=True" not in source  # GRPO's per-rollout directories are set by the caller and kept
+
+
 def test_server_env_keeps_secrets_out() -> None:
     base = {"PATH": "/bin", "HF_TOKEN": "hf_x", "OPENCODE_PASSWORD": "pw", "OPENCODE_CONFIG_CONTENT": "{}"}
     env = opencode.server_env(V2, base, workspace="/w", strip_credentials=True)
