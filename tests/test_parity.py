@@ -273,3 +273,32 @@ def test_records_never_contain_credentials():
     token = "hf_" + "A1b2C3d4" * 4 + "xyzw1"
     line = record_line({"tool_events": [{"response": f"HF_TOKEN={token}", "tool_input": {"command": f"curl -H 'Bearer {token}'"}}]})
     assert token not in line and "hf_***REDACTED***" in line
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        "line one\n{token}",  # a token printed at the start of a line: serialised as `\nhf_...`
+        "a\t{token}",
+        "a\r\n{token}",
+        "\x1b[0m{token}",  # after a terminal escape, serialised as `\u001b[0m...` (here: `m` before the token)
+        " {token}",  # a Unicode line break, written as the escape ` `
+        "{token}",
+    ],
+)
+def test_tokens_after_json_escapes_are_redacted(output):
+    from harness.opencode import record_line
+
+    tokens = ["hf_" + "A1b2C3d4" * 4, "ghp_" + "Z1x2C3v4" * 4]
+    if not output.startswith("\x1b"):  # `sk-` right after a letter is indistinguishable from words like "task-"
+        tokens.append("sk-" + "Q9w8E7r6" * 4)
+    for token in tokens:
+        line = record_line({"tool_events": [{"response": output.format(token=token)}]})
+        assert token not in line, (output, token[:3])
+
+
+def test_redaction_keeps_ordinary_words():
+    from harness.credentials import redact_credentials
+
+    text = "task-" + "abcdefgh" * 4 + " graph_" + "A1b2C3d4" * 4
+    assert redact_credentials(text) == text  # `sk-` inside "task-..." is not a key

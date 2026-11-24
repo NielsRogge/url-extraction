@@ -46,15 +46,18 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
+from harness.credentials import CREDENTIAL_RE, redact_credentials
+
 HARNESS = "opencode"
 MAX_TOOL_OUTPUT_CHARS = 60_000
-TOKEN_RE = re.compile(r"\bhf_[A-Za-z0-9]{20,}\b")
+# The shared credential pattern (hf_, sk-, ghp_), which also catches tokens right after a JSON escape such as `\n`.
+TOKEN_RE = CREDENTIAL_RE
 SESSIONS_DIR = "sessions"
 COLLECTION_URL = "https://huggingface.co/collections/nielsr/paper-url-agent-frontier-to-small-distillation-6b01c8378db0ff55d524014e"
 
 
 def _redact(text: str) -> str:
-    return TOKEN_RE.sub("hf_***REDACTED***", text)
+    return redact_credentials(text)
 
 
 def _iso(ms: float | None) -> str:
