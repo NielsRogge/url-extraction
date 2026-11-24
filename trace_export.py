@@ -133,6 +133,7 @@ def record_to_pi_session(record: dict[str, Any]) -> list[dict[str, Any]]:
         "difficulty_tier": record.get("difficulty_tier"),
         "accepted": record.get("accepted"),
         "attempt": record.get("attempt"),
+        "opencode_version": record.get("opencode_version") or "1.2.4",
     }
     lines: list[dict[str, Any]] = [header]
     parent: str | None = None
@@ -291,8 +292,14 @@ def read_records(path: Path) -> Iterable[dict[str, Any]]:
                 yield json.loads(line)
 
 
-def ensure_card(api: Any, repo_id: str, episode_files: list[str]) -> None:
-    """Make `sessions` the default config (trace viewer), keep raw records as `episodes`, tag agent-traces."""
+def opencode_versions(records: Iterable[dict[str, Any]]) -> set[str]:
+    """OpenCode releases that produced these records (records before the field existed ran 1.2.4)."""
+    return {str(record.get("opencode_version") or "1.2.4") for record in records}
+
+
+def ensure_card(api: Any, repo_id: str, episode_files: list[str], versions: set[str] | None = None) -> None:
+    """Make `sessions` the default config (trace viewer), keep raw records as `episodes`, tag agent-traces, and
+    record the OpenCode version(s) the episodes ran in (tag `opencode-<version>` and an `OpenCode` section)."""
     from huggingface_hub import DatasetCard
     from huggingface_hub.utils import EntryNotFoundError, RepositoryNotFoundError
 
@@ -302,7 +309,8 @@ def ensure_card(api: Any, repo_id: str, episode_files: list[str]) -> None:
         card = DatasetCard(f"---\ntags: []\n---\n\n# {repo_id.split('/')[-1]}\n\nOpenCode URL-extraction agent episodes. "
                            f"Part of the [paper URL agent collection]({COLLECTION_URL}).\n")
     data = card.data.to_dict()
-    tags = list(dict.fromkeys([*(data.get("tags") or []), "agent-traces", "opencode"]))
+    tags = list(dict.fromkeys([*(data.get("tags") or []), "agent-traces", "opencode",
+                               *(f"opencode-{version}" for version in sorted(versions or ()))]))
     configs = [c for c in (data.get("configs") or []) if c.get("config_name") not in {"sessions", "episodes"}]
     for config in configs:
         config.pop("default", None)
@@ -323,6 +331,14 @@ def ensure_card(api: Any, repo_id: str, episode_files: list[str]) -> None:
             "reasoning, tool calls and results, and the final verification. The raw records are in the "
             "`episodes` config.\n"
         )
+    known = sorted({tag.removeprefix("opencode-") for tag in tags if re.fullmatch(r"opencode-\d+\.\d+\.\d+", tag)})
+    if known:
+        section = (f"## OpenCode\n\nEpisodes ran in OpenCode {', '.join(known)} (the `opencode_version` field of each "
+                   "record).\n")
+        if "## OpenCode\n" in card.text:
+            card.text = re.sub(r"## OpenCode\n\n.*?\n(?=\n## |\Z)", section, card.text, flags=re.DOTALL)
+        else:
+            card.text += "\n" + section
     card.push_to_hub(repo_id, repo_type="dataset", token=api.token, commit_message="Card: agent-traces viewer configs")
 
 
@@ -339,7 +355,7 @@ def publish_sessions(api: Any, repo_id: str, records_path: Path, path_in_repo: s
                 repo_type="dataset",
                 commit_message=f"Agent-trace sessions for {path_in_repo}",
             )
-    ensure_card(api, repo_id, [path_in_repo])
+    ensure_card(api, repo_id, [path_in_repo], opencode_versions(read_records(records_path)))
     return count
 
 

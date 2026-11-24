@@ -19,6 +19,7 @@ Teachers and students so far:
 | `zai-org/GLM-5.2` (`GLM-5.3` is now the default) | `Qwen/Qwen3.5-4B` | [docs/EXPERIMENT_glm52_qwen35-4b.md](docs/EXPERIMENT_glm52_qwen35-4b.md) |
 | `moonshotai/Kimi-K3.1-Pro` | `Qwen/Qwen3.5-9B` | [docs/EXPERIMENT_kimi-k31_qwen35-9b.md](docs/EXPERIMENT_kimi-k31_qwen35-9b.md) |
 | `thinkingmachines/Inkling-2-Small` | `thinkingmachines/Inkling-2-Mini` | [docs/EXPERIMENT_inkling-2-small_inkling-2-mini.md](docs/EXPERIMENT_inkling-2-small_inkling-2-mini.md) |
+| `zai-org/GLM-5.3`, in OpenCode 2.3.2 (the others ran in 1.2.4) | `Qwen/Qwen3.5-4B` | [docs/EXPERIMENT_glm53_qwen35-4b_opencode2.md](docs/EXPERIMENT_glm53_qwen35-4b_opencode2.md) |
 
 ## Results
 
@@ -49,6 +50,7 @@ student against its own merged SFT checkpoint in the same job:
 | GLM-5.2 -> Qwen3.5-4B (GRPO v3) | 73.2% | 78.1% | 81.8% | 6.5 -> 4.4, 7.3 |
 | Inkling-2-Small -> Inkling-2-Mini | 70.6% | 84.8% | 80.7% | 8.5 -> 7.7, 11.3 |
 | Kimi-K3.1-Pro -> Qwen3.5-9B (GRPO v3) | 73.2% | 66.5% | 80.3% | 5.2 -> 5.6, 11.4 |
+| GLM-5.3 -> Qwen3.5-4B, OpenCode 2.3.2 | 41.6% | 71.7% | 69.9% | 8.7 -> 4.3, 8.6 |
 
 Takeaways:
 

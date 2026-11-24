@@ -1,0 +1,7 @@
+# GLM-5.3 through HF Inference Providers (automatic routing). Teacher of the OpenCode-v2 Qwen3.5-4B run
+# (docs/EXPERIMENT_glm53_qwen35-4b_opencode2.md). In OpenCode 2.3.2's bundled models.dev catalog, so no inline
+# model entry is needed. OpenCode is not pinned here: pass --opencode-version (1.2.4 or 2.3.2).
+name = "glm-5.3"
+model = "zai-org/GLM-5.3"
+opencode_model = "huggingface/zai-org/GLM-5.3"
+notes = "~$0.01-0.03 per paper in OpenCode 2.3.2 (smoke test)"

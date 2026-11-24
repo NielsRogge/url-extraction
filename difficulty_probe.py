@@ -34,7 +34,6 @@ import shlex
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
 import urllib.request
 from contextlib import suppress
@@ -43,11 +42,16 @@ from typing import Any
 
 import httpx
 from datasets import load_dataset
-from opencode_ai import AsyncOpencode
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from evaluate_vllm import SCOREABLE_QUALITIES, install_opencode, opencode_server, run_one  # noqa: E402
+from evaluate_vllm import SCOREABLE_QUALITIES, opencode_server, run_one  # noqa: E402
+from harness.opencode import (  # noqa: E402
+    OPENCODE_VERSION,
+    SUPPORTED_OPENCODE_VERSIONS,
+    find_or_install_opencode,
+    opencode_client,
+)
 
 VLLM_VERSION = "0.33.0"
 SERVED = "policy"
@@ -120,9 +124,10 @@ async def probe(rows: list[dict[str, Any]], args: argparse.Namespace, out: Path)
     sem = asyncio.Semaphore(args.concurrency)
     started = time.monotonic()
     finished = 0
-    async with opencode_server(str(args.opencode_binary), strip_credentials=True) as base_url, AsyncOpencode(
-        base_url=base_url, timeout=httpx.Timeout(args.episode_timeout + 120, connect=10), max_retries=1
-    ) as client:
+    async with (
+        opencode_server(str(args.opencode_binary), strip_credentials=True, version=args.opencode_version) as server,
+        opencode_client(server, timeout=httpx.Timeout(args.episode_timeout + 120, connect=10)) as client,
+    ):
 
         async def one(row: dict[str, Any], attempt: int) -> None:
             nonlocal finished
@@ -138,6 +143,7 @@ async def probe(rows: list[dict[str, Any]], args: argparse.Namespace, out: Path)
                 "all_scoreable_correct": record["verification"].get("all_scoreable_correct"),
                 "attempt_complete": record.get("attempt_complete"),
                 "failure_reason": record.get("failure_reason"),
+                "opencode_version": record.get("opencode_version"),
                 "tool_calls": len(record.get("tool_events") or []),
                 "elapsed_seconds": record.get("elapsed_seconds"),
             }
@@ -182,6 +188,7 @@ def main() -> None:
     parser.add_argument("--temperature", type=float, default=0.8)
     parser.add_argument("--episode-timeout", type=float, default=180)
     parser.add_argument("--max-tool-calls", type=int, default=15)
+    parser.add_argument("--opencode-version", default=OPENCODE_VERSION, choices=SUPPORTED_OPENCODE_VERSIONS)
     parser.add_argument("--max-model-len", type=int, default=65536)
     parser.add_argument("--output-dir", type=Path, default=Path("difficulty"))
     parser.add_argument("--output-repo", help="Dataset repo to upload results to (under difficulty/)")
@@ -208,7 +215,7 @@ def main() -> None:
     if args.limit:
         rows = rows[: args.limit]
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    args.opencode_binary = shutil.which("opencode") or install_opencode(Path(tempfile.mkdtemp()) / "opencode")
+    args.opencode_binary = find_or_install_opencode("opencode", args.opencode_version)
     os.environ["PATH"] = str(Path(args.opencode_binary).parent) + os.pathsep + os.environ["PATH"]
     vllm = start_vllm(args.model, args)
     try:

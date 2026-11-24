@@ -234,13 +234,14 @@ def test_evaluator_restarts_opencode_after_a_harness_failure(tmp_path, monkeypat
     servers: list[str] = []
 
     @asynccontextmanager
-    async def fake_server(command, base_url=None, strip_credentials=False):
+    async def fake_server(command, base_url=None, strip_credentials=False, version=None):
         assert strip_credentials  # the agent's shell must not see the job's HF token
+        assert version == "1.2.4"
         servers.append(command)
         yield "http://opencode"
 
     class FakeClientFactory:
-        def __init__(self, **kwargs):
+        def __init__(self, server, **kwargs):
             # The first server is broken; every later one works.
             self.client = FakeOpenCode(broken_messages if len(servers) == 1 else good_messages, response)
 
@@ -252,12 +253,12 @@ def test_evaluator_restarts_opencode_after_a_harness_failure(tmp_path, monkeypat
 
     rows = [dict(data, paper_id=i, arxiv_id=f"{ARXIV}{i}") for i in range(3)]
     monkeypatch.setattr(evaluate_vllm, "opencode_server", fake_server)
-    monkeypatch.setattr(evaluate_vllm, "AsyncOpencode", FakeClientFactory)
+    monkeypatch.setattr(evaluate_vllm, "opencode_client", FakeClientFactory)
     monkeypatch.setattr(evaluate_vllm, "load_dataset", lambda *a, **k: rows)
     args = evaluate_vllm.argparse.Namespace(
         include_partial=False, dataset="d", split="test", paper_ids=None, start=0, limit=10, adapter="",
         adapter_only=False, base_model="m", opencode_binary="opencode", request_timeout=30, concurrency=1,
-        episode_timeout=30, max_tool_calls=15, max_harness_restarts=3,
+        episode_timeout=30, max_tool_calls=15, max_harness_restarts=3, opencode_version="1.2.4",
     )  # fmt: skip
     output = tmp_path / "eval.jsonl"
     asyncio.run(evaluate_vllm.evaluate(args, output))
